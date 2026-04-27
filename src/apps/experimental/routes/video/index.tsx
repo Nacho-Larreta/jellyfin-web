@@ -1,9 +1,11 @@
 import Box from '@mui/material/Box/Box';
 import Fade from '@mui/material/Fade/Fade';
-import React, { useRef, type FC, useEffect, useState } from 'react';
+import React, { useRef, type FC, useCallback, useEffect, useState } from 'react';
 
 import RemotePlayButton from 'apps/experimental/components/AppToolbar/RemotePlayButton';
+import SearchButton from 'apps/experimental/components/AppToolbar/SearchButton';
 import SyncPlayButton from 'apps/experimental/components/AppToolbar/SyncPlayButton';
+import NotificationButton from 'apps/experimental/components/AppToolbar/NotificationButton';
 import AppToolbar from 'components/toolbar/AppToolbar';
 import ViewManagerPage from 'components/viewManager/ViewManagerPage';
 import { EventType } from 'constants/eventType';
@@ -25,6 +27,10 @@ const VideoPage: FC = () => {
     const onTitleChange = (_e: Event, title: string) => {
         setVideoTitle(title);
     };
+
+    const showToolbar = useCallback(() => {
+        setIsVisible(true);
+    }, []);
 
     useEffect(() => {
         const doc = documentRef.current;
@@ -53,17 +59,24 @@ const VideoPage: FC = () => {
                     top: 0,
                     left: 0,
                     right: 0,
-                    color: 'white'
-                }}>
+                    zIndex: theme => theme.zIndex.appBar + 2,
+                    color: 'white',
+                    pointerEvents: 'auto',
+                    background: 'linear-gradient(180deg, rgba(0, 0, 0, 0.74) 0%, rgba(0, 0, 0, 0) 100%)'
+                }}
+                onMouseEnter={showToolbar}
+                >
                     <AppToolbar
                         isDrawerAvailable={false}
                         isDrawerOpen={false}
                         isBackButtonAvailable
-                        isUserMenuAvailable={false}
+                        isUserMenuAvailable
                         buttons={
                             <>
+                                <SearchButton />
                                 <SyncPlayButton />
                                 <RemotePlayButton />
+                                <NotificationButton />
                             </>
                         }
                     >

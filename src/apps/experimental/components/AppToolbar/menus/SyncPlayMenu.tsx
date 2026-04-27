@@ -1,4 +1,5 @@
 import { SyncPlayUserAccessType } from '@jellyfin/sdk/lib/generated-client/models/sync-play-user-access-type';
+import type { GroupInfoDto } from '@jellyfin/sdk/lib/generated-client/models/group-info-dto';
 import GroupAdd from '@mui/icons-material/GroupAdd';
 import PersonAdd from '@mui/icons-material/PersonAdd';
 import PersonOff from '@mui/icons-material/PersonOff';
@@ -11,7 +12,7 @@ import ListItem from '@mui/material/ListItem';
 import ListItemIcon from '@mui/material/ListItemIcon';
 import ListItemText from '@mui/material/ListItemText';
 import ListSubheader from '@mui/material/ListSubheader';
-import Menu, { MenuProps } from '@mui/material/Menu';
+import type { MenuProps } from '@mui/material/Menu';
 import MenuItem from '@mui/material/MenuItem';
 import React, { FC, useCallback } from 'react';
 
@@ -24,11 +25,46 @@ import { useSyncPlay } from 'apps/experimental/features/syncPlay/hooks/useSyncPl
 import { useApi } from 'hooks/useApi';
 import globalize from 'lib/globalize';
 
+import { ToolbarMenu, TOOLBAR_MENU_ITEM_SX } from './ToolbarMenu';
+
 export const ID = 'app-sync-play-menu';
 
 interface SyncPlayMenuProps extends MenuProps {
     onMenuClose: () => void
 }
+
+const SyncPlayGroupMenuItem: FC<{
+    group: GroupInfoDto;
+    onGroupJoinClick: (groupId: string) => void;
+}> = ({
+    group,
+    onGroupJoinClick
+}) => {
+    const onClick = useCallback(() => {
+        if (group.GroupId) {
+            onGroupJoinClick(group.GroupId);
+        }
+    }, [ group.GroupId, onGroupJoinClick ]);
+
+    return (
+        <ListItem
+            sx={{
+                color: '#fff',
+                px: 2.25,
+                py: 1.1
+            }}
+        >
+            <SyncPlayGroupListItem
+                group={group}
+                button={{
+                    onClick,
+                    tooltip: globalize.translate('LabelSyncPlayJoinGroup'),
+                    Icon: PersonAdd
+                }}
+            />
+        </ListItem>
+    );
+};
 
 const SyncPlayMenu: FC<SyncPlayMenuProps> = ({
     anchorEl,
@@ -115,6 +151,7 @@ const SyncPlayMenu: FC<SyncPlayMenuProps> = ({
                 <MenuItem
                     key='sync-play-start-playback'
                     onClick={onStartGroupPlaybackClick}
+                    sx={TOOLBAR_MENU_ITEM_SX}
                 >
                     <ListItemIcon>
                         <PlayCircle />
@@ -127,6 +164,7 @@ const SyncPlayMenu: FC<SyncPlayMenuProps> = ({
                 <MenuItem
                     key='sync-play-stop-playback'
                     onClick={onStopGroupPlaybackClick}
+                    sx={TOOLBAR_MENU_ITEM_SX}
                 >
                     <ListItemIcon>
                         <StopCircle />
@@ -140,6 +178,7 @@ const SyncPlayMenu: FC<SyncPlayMenuProps> = ({
             <MenuItem
                 key='sync-play-settings'
                 onClick={onGroupSettingsClick}
+                sx={TOOLBAR_MENU_ITEM_SX}
             >
                 <ListItemIcon>
                     <Tune />
@@ -151,7 +190,11 @@ const SyncPlayMenu: FC<SyncPlayMenuProps> = ({
         );
     } else if (!groups?.length && user?.Policy?.SyncPlayAccess !== SyncPlayUserAccessType.CreateAndJoinGroups) {
         menuItems.push(
-            <MenuItem key='sync-play-unavailable' disabled>
+            <MenuItem
+                key='sync-play-unavailable'
+                disabled
+                sx={TOOLBAR_MENU_ITEM_SX}
+            >
                 <ListItemIcon>
                     <PersonOff />
                 </ListItemIcon>
@@ -162,16 +205,11 @@ const SyncPlayMenu: FC<SyncPlayMenuProps> = ({
         if (groups && groups.length > 0) {
             groups.forEach(group => {
                 menuItems.push(
-                    <ListItem key={group.GroupId}>
-                        <SyncPlayGroupListItem
-                            group={group}
-                            button={{
-                                onClick: () => group.GroupId && onGroupJoinClick(group.GroupId),
-                                tooltip: globalize.translate('LabelSyncPlayJoinGroup'),
-                                Icon: PersonAdd
-                            }}
-                        />
-                    </ListItem>
+                    <SyncPlayGroupMenuItem
+                        key={group.GroupId}
+                        group={group}
+                        onGroupJoinClick={onGroupJoinClick}
+                    />
                 );
             });
 
@@ -185,6 +223,7 @@ const SyncPlayMenu: FC<SyncPlayMenuProps> = ({
                 <MenuItem
                     key='sync-play-new-group'
                     onClick={onGroupAddClick}
+                    sx={TOOLBAR_MENU_ITEM_SX}
                 >
                     <ListItemIcon>
                         <GroupAdd />
@@ -219,18 +258,9 @@ const SyncPlayMenu: FC<SyncPlayMenuProps> = ({
     } : undefined;
 
     return (
-        <Menu
+        <ToolbarMenu
             anchorEl={anchorEl}
-            anchorOrigin={{
-                vertical: 'bottom',
-                horizontal: 'right'
-            }}
-            transformOrigin={{
-                vertical: 'top',
-                horizontal: 'right'
-            }}
             id={ID}
-            keepMounted
             open={open}
             onClose={onMenuClose}
             slotProps={{
@@ -238,7 +268,7 @@ const SyncPlayMenu: FC<SyncPlayMenuProps> = ({
             }}
         >
             {menuItems}
-        </Menu>
+        </ToolbarMenu>
     );
 };
 

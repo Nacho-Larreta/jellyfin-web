@@ -5,7 +5,7 @@ import Divider from '@mui/material/Divider';
 import ListItemIcon from '@mui/material/ListItemIcon';
 import ListItemText from '@mui/material/ListItemText';
 import ListSubheader from '@mui/material/ListSubheader';
-import Menu, { MenuProps } from '@mui/material/Menu';
+import type { MenuProps } from '@mui/material/Menu';
 import MenuItem from '@mui/material/MenuItem';
 import dialog from 'components/dialog/dialog';
 import { playbackManager } from 'components/playback/playbackmanager';
@@ -14,6 +14,8 @@ import { Link } from 'react-router-dom';
 
 import { enable, isEnabled } from 'scripts/autocast';
 import globalize from 'lib/globalize';
+
+import { ToolbarMenu, TOOLBAR_MENU_ITEM_SX } from './ToolbarMenu';
 
 interface RemotePlayActiveMenuProps extends MenuProps {
     onMenuClose: () => void
@@ -80,18 +82,9 @@ const RemotePlayActiveMenu: FC<RemotePlayActiveMenuProps> = ({
     }, [ onMenuClose, remotePlayerName ]);
 
     return (
-        <Menu
+        <ToolbarMenu
             anchorEl={anchorEl}
-            anchorOrigin={{
-                vertical: 'bottom',
-                horizontal: 'right'
-            }}
-            transformOrigin={{
-                vertical: 'top',
-                horizontal: 'right'
-            }}
             id={ID}
-            keepMounted
             open={open}
             onClose={onMenuClose}
             slotProps={{
@@ -106,7 +99,10 @@ const RemotePlayActiveMenu: FC<RemotePlayActiveMenuProps> = ({
             }}
         >
             {isDisplayMirrorSupported && (
-                <MenuItem onClick={toggleDisplayMirror}>
+                <MenuItem
+                    onClick={toggleDisplayMirror}
+                    sx={TOOLBAR_MENU_ITEM_SX}
+                >
                     {isDisplayMirrorEnabled && (
                         <ListItemIcon>
                             <Check />
@@ -118,7 +114,10 @@ const RemotePlayActiveMenu: FC<RemotePlayActiveMenuProps> = ({
                 </MenuItem>
             )}
 
-            <MenuItem onClick={toggleAutoCast}>
+            <MenuItem
+                onClick={toggleAutoCast}
+                sx={TOOLBAR_MENU_ITEM_SX}
+            >
                 {isAutoCastEnabled && (
                     <ListItemIcon>
                         <Check />
@@ -135,6 +134,7 @@ const RemotePlayActiveMenu: FC<RemotePlayActiveMenuProps> = ({
                 component={Link}
                 to='/queue'
                 onClick={onMenuClose}
+                sx={TOOLBAR_MENU_ITEM_SX}
             >
                 <ListItemIcon>
                     <SettingsRemote />
@@ -144,7 +144,10 @@ const RemotePlayActiveMenu: FC<RemotePlayActiveMenuProps> = ({
                 </ListItemText>
             </MenuItem>
             <Divider />
-            <MenuItem onClick={disconnectRemotePlayer}>
+            <MenuItem
+                onClick={disconnectRemotePlayer}
+                sx={TOOLBAR_MENU_ITEM_SX}
+            >
                 <ListItemIcon>
                     <Close />
                 </ListItemIcon>
@@ -152,7 +155,7 @@ const RemotePlayActiveMenu: FC<RemotePlayActiveMenuProps> = ({
                     {globalize.translate('Disconnect')}
                 </ListItemText>
             </MenuItem>
-        </Menu>
+        </ToolbarMenu>
     );
 };
 

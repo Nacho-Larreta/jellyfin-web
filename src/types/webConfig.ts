@@ -11,6 +11,10 @@ interface MenuLink {
     url: string
 }
 
+interface JellyflixConfig {
+    syncPlayEnabled?: boolean
+}
+
 export interface WebConfig {
     includeCorsCredentials?: boolean
     multiserver?: boolean
@@ -18,4 +22,5 @@ export interface WebConfig {
     menuLinks?: MenuLink[]
     servers?: string[]
     plugins?: string[]
+    jellyflix?: JellyflixConfig
 }

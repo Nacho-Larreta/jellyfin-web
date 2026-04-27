@@ -1,0 +1,32 @@
+<div id="profileSelectorManagePage" data-role="page" class="page standalonePage backdropPage profileSelectorPage profileSelectorManagePage" data-backbutton="false" data-backdroptype="splashscreen">
+    <div class="profileSelectorShell">
+        <div class="profileSelectorManagePanel">
+            <h1 class="profileSelectorManageTitle">${ManageProfiles}</h1>
+            <p class="profileSelectorManageSubtitle">${ProfileSelectorManageSubtitle}</p>
+
+            <div class="profileSelectorManageToggles">
+                <label class="checkboxContainer">
+                    <input is="emby-checkbox" type="checkbox" class="chkProfileSelectorEnabled" />
+                    <span>${ProfileSelectorEnabledLabel}</span>
+                </label>
+
+                <label class="checkboxContainer">
+                    <input is="emby-checkbox" type="checkbox" class="chkProfileSelectorAutoSelect" />
+                    <span>${ProfileSelectorAutoSelectLabel}</span>
+                </label>
+            </div>
+
+            <div class="profileSelectorManageList"></div>
+
+            <div class="profileSelectorFooterActions">
+                <button is="emby-button" type="button" class="raised block btnSaveProfiles">
+                    <span>${Save}</span>
+                </button>
+
+                <button is="emby-button" type="button" class="block btnBackToSelector">
+                    <span>${ButtonBack}</span>
+                </button>
+            </div>
+        </div>
+    </div>
+</div>

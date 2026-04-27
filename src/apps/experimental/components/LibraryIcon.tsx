@@ -13,8 +13,11 @@ import Queue from '@mui/icons-material/Queue';
 import Quiz from '@mui/icons-material/Quiz';
 import VideoLibrary from '@mui/icons-material/VideoLibrary';
 import Folder from '@mui/icons-material/Folder';
+import Lock from '@mui/icons-material/Lock';
+import School from '@mui/icons-material/School';
 import React, { FC } from 'react';
 
+import { JellyflixCollectionType } from 'constants/jellyflixCollectionTypes';
 import { MetaView } from '../constants/metaView';
 
 interface LibraryIconProps {
@@ -28,7 +31,7 @@ const LibraryIcon: FC<LibraryIconProps> = ({
         return <Favorite />;
     }
 
-    switch (item.CollectionType) {
+    switch (item.CollectionType as string | undefined) {
         case CollectionType.Movies:
             return <Movie />;
         case CollectionType.Music:
@@ -50,6 +53,10 @@ const LibraryIcon: FC<LibraryIconProps> = ({
             return <VideoLibrary />;
         case CollectionType.Playlists:
             return <Queue />;
+        case JellyflixCollectionType.Courses:
+            return <School />;
+        case JellyflixCollectionType.AdultVideos:
+            return <Lock />;
         case undefined:
             return <Quiz />;
         default:

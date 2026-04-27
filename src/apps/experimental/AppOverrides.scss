@@ -9,6 +9,47 @@ $mui-bp-xl: 1536px;
     height: 100%;
 }
 
+.jellyflixToolbarNav {
+    .MuiButton-root {
+        color: rgba(255, 255, 255, 0.72);
+        min-width: auto;
+        padding: 0;
+        font-size: 0.875rem;
+        font-weight: 400;
+        letter-spacing: 0.005em;
+        line-height: 1;
+        text-transform: none;
+        white-space: nowrap;
+    }
+
+    .MuiButton-root:first-child {
+        color: #fff;
+        margin-right: 18px;
+        font-family: "Bebas Neue", "Netflix Sans", "Figtree", "Helvetica Neue", Arial, sans-serif;
+        font-size: 1.9rem;
+        font-weight: 400;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+    }
+
+    .MuiButton-root:first-child .MuiButton-startIcon {
+        margin-right: 8px;
+    }
+
+    .MuiButton-root:first-child .MuiButton-startIcon .MuiSvgIcon-root {
+        font-size: 2.15rem;
+    }
+
+    > .MuiButton-root:not(:first-child) .MuiButton-startIcon {
+        display: none;
+    }
+
+    .MuiButton-root.jellyflixToolbarNavItemActive {
+        color: #fff;
+        font-weight: 700;
+    }
+}
+
 // Hide some items from the user "settings" page that are in the drawer
 #myPreferencesMenuPage {
     .lnkQuickConnectPreferences,
@@ -24,7 +65,7 @@ $mui-bp-xl: 1536px;
 .libraryPage:not(
     .itemDetailPage
 ) {
-    padding-top: 3.25rem !important;
+    padding-top: 5.5rem !important;
 }
 
 .layout-mobile {

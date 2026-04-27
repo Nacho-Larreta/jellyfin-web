@@ -45,16 +45,33 @@ const AppToolbar: FC<PropsWithChildren<AppToolbarProps>> = ({
             variant='dense'
             sx={{
                 flexWrap: {
-                    xs: 'wrap',
+                    xs: 'nowrap',
                     lg: 'nowrap'
                 },
+                alignItems: 'center',
+                minHeight: {
+                    xs: '64px',
+                    md: '68px'
+                },
+                height: {
+                    xs: '64px',
+                    md: '68px'
+                },
+                width: '100%',
+                boxSizing: 'border-box',
                 pl: {
-                    xs: 'max(16px, env(safe-area-inset-left))',
-                    sm: 'max(24px, env(safe-area-inset-left))'
+                    xs: 'max(18px, env(safe-area-inset-left))',
+                    sm: 'max(36px, env(safe-area-inset-left))',
+                    lg: 'max(56px, env(safe-area-inset-left))'
                 },
                 pr: {
-                    xs: 'max(16px, env(safe-area-inset-left))',
-                    sm: 'max(24px, env(safe-area-inset-left))'
+                    xs: 'max(18px, env(safe-area-inset-right))',
+                    sm: 'max(36px, env(safe-area-inset-right))',
+                    lg: 'max(56px, env(safe-area-inset-right))'
+                },
+                gap: {
+                    xs: 2,
+                    md: '36px'
                 }
             }}
         >
@@ -89,7 +106,23 @@ const AppToolbar: FC<PropsWithChildren<AppToolbarProps>> = ({
 
             {children}
 
-            <Box sx={{ display: 'flex', flexGrow: 1, justifyContent: 'flex-end' }}>
+            <Box
+                sx={{
+                    display: 'flex',
+                    flexGrow: 1,
+                    justifyContent: 'flex-end',
+                    alignItems: 'center',
+                    gap: '18px',
+                    minWidth: 0,
+                    '& .MuiIconButton-root': {
+                        p: '6px',
+                        color: '#fff'
+                    },
+                    '& .MuiSvgIcon-root': {
+                        fontSize: '1.75rem'
+                    }
+                }}
+            >
                 {buttons}
             </Box>
 

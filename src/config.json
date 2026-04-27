@@ -31,6 +31,9 @@
   ],
   "menuLinks": [],
   "servers": [],
+  "jellyflix": {
+    "syncPlayEnabled": false
+  },
   "plugins": [
     "playAccessValidation/plugin",
     "experimentalWarnings/plugin",

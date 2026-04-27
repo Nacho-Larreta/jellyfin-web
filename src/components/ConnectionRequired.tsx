@@ -3,6 +3,8 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import type { ApiClient, ConnectResponse } from 'jellyfin-apiclient';
 
 import { ConnectionState, ServerConnections } from 'lib/jellyfin-apiclient';
+import { resolveProfileSelectorRoute } from 'lib/profileSelector/navigation';
+import { PROFILE_SELECTOR_PATH } from 'lib/profileSelector/utils';
 
 import ConnectionErrorPage from './ConnectionErrorPage';
 import Loading from './loading/LoadingComponent';
@@ -179,8 +181,22 @@ const ConnectionRequired: FunctionComponent<ConnectionRequiredProps> = ({
             }
         }
 
+        if (level === AccessLevel.User && location.pathname !== PROFILE_SELECTOR_PATH) {
+            try {
+                const currentPath = location.pathname + location.search;
+                const targetRoute = await resolveProfileSelectorRoute(client, currentPath);
+
+                if (targetRoute !== currentPath) {
+                    navigate(targetRoute);
+                    return;
+                }
+            } catch (ex) {
+                console.warn('[ConnectionRequired] unable to validate profile selector state', ex);
+            }
+        }
+
         setIsLoading(false);
-    }, [bounce, level]);
+    }, [bounce, level, location.pathname, location.search, navigate]);
 
     useEffect(() => {
         // Check connection status on initial page load

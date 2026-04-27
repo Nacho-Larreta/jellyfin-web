@@ -179,6 +179,53 @@ export const LibraryRoutes: LibraryRoute[] = [
         ]
     },
     {
+        path: '/courses',
+        views: [
+            {
+                index: 0,
+                label: 'HeaderVideos',
+                view: LibraryTab.Videos,
+                isDefault: true
+            },
+            {
+                index: 1,
+                label: 'Folders',
+                view: LibraryTab.Folders
+            },
+            {
+                index: 2,
+                label: 'Favorites',
+                view: LibraryTab.Favorites
+            },
+            {
+                index: 3,
+                label: 'Genres',
+                view: LibraryTab.Genres
+            }
+        ]
+    },
+    {
+        path: '/adultvideos',
+        views: [
+            {
+                index: 0,
+                label: 'HeaderVideos',
+                view: LibraryTab.Videos,
+                isDefault: true
+            },
+            {
+                index: 1,
+                label: 'Folders',
+                view: LibraryTab.Folders
+            },
+            {
+                index: 2,
+                label: 'Favorites',
+                view: LibraryTab.Favorites
+            }
+        ]
+    },
+    {
         path: '/homevideos',
         views: [
             {

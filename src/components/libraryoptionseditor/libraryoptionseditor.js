@@ -7,6 +7,7 @@
 import { CollectionType } from '@jellyfin/sdk/lib/generated-client/models/collection-type';
 import escapeHtml from 'escape-html';
 
+import { JellyflixCollectionType } from 'constants/jellyflixCollectionTypes';
 import globalize from '../../lib/globalize';
 import dom from '../../utils/dom';
 import '../../elements/emby-checkbox/emby-checkbox';
@@ -458,6 +459,8 @@ export async function embed(parent, contentType, libraryOptions) {
 }
 
 const CHAPTER_CONTENT_TYPES = [
+    JellyflixCollectionType.Courses,
+    JellyflixCollectionType.AdultVideos,
     CollectionType.Homevideos,
     CollectionType.Movies,
     CollectionType.Musicvideos,
@@ -503,7 +506,12 @@ export function setContentType(parent, contentType) {
         parent.querySelector('.chkEnableEmbeddedEpisodeInfosContainer').classList.add('hide');
     }
 
-    if (contentType === 'tvshows' || contentType === 'movies' || contentType === 'musicvideos' || contentType === 'mixed') {
+    if (contentType === 'tvshows'
+        || contentType === 'movies'
+        || contentType === 'musicvideos'
+        || contentType === JellyflixCollectionType.Courses
+        || contentType === JellyflixCollectionType.AdultVideos
+        || contentType === 'mixed') {
         parent.querySelector('.fldAllowEmbeddedSubtitlesContainer').classList.remove('hide');
     } else {
         parent.querySelector('.fldAllowEmbeddedSubtitlesContainer').classList.add('hide');

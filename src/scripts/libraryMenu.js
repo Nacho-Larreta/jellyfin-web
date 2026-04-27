@@ -5,6 +5,8 @@ import { AppFeature } from 'constants/appFeature';
 import { getUserViewsQuery } from 'hooks/useUserViews';
 import globalize from 'lib/globalize';
 import { ServerConnections } from 'lib/jellyfin-apiclient';
+import { getCurrentProfileSelector } from 'lib/profileSelector/api';
+import { getProfileAvatarGradientForUser } from 'lib/profileSelector/colors';
 import { EventType } from 'constants/eventType';
 import { toApi } from 'utils/jellyfin-apiclient/compat';
 import { queryClient } from 'utils/query/queryClient';
@@ -37,6 +39,10 @@ function renderHeader() {
     let html = '';
     html += '<div class="flex align-items-center flex-grow headerTop">';
     html += '<div class="headerLeft">';
+    html += '<button type="button" class="jellyflixHeaderBrand headerButtonLeft" aria-label="Jellyfin">';
+    html += '<span class="material-icons jellyflixHeaderBrandIcon" aria-hidden="true">person</span>';
+    html += '<span class="jellyflixHeaderBrandText">Jellyfin</span>';
+    html += '</button>';
     html += '<button type="button" is="paper-icon-button-light" class="headerButton headerButtonLeft headerBackButton hide"><span class="material-icons ' + (browser.safari ? 'chevron_left' : 'arrow_back') + '" aria-hidden="true"></span></button>';
     html += '<button type="button" is="paper-icon-button-light" class="headerButton headerHomeButton hide barsMenuButton headerButtonLeft"><span class="material-icons home" aria-hidden="true"></span></button>';
     html += '<button type="button" is="paper-icon-button-light" class="headerButton mainDrawerButton barsMenuButton headerButtonLeft hide"><span class="material-icons menu" aria-hidden="true"></span></button>';
@@ -64,6 +70,7 @@ function renderHeader() {
     headerBackButton = skinHeader.querySelector('.headerBackButton');
     headerHomeButton = skinHeader.querySelector('.headerHomeButton');
     mainDrawerButton = skinHeader.querySelector('.mainDrawerButton');
+    jellyflixHeaderBrandButton = skinHeader.querySelector('.jellyflixHeaderBrand');
     headerUserButton = skinHeader.querySelector('.headerUserButton');
     headerCastButton = skinHeader.querySelector('.headerCastButton');
     headerAudioPlayerButton = skinHeader.querySelector('.headerAudioPlayerButton');
@@ -138,7 +145,7 @@ function updateUserInHeader(user) {
     if (user?.name) {
         if (user.imageUrl) {
             const url = user.imageUrl;
-            updateHeaderUserButton(url);
+            updateHeaderUserButton(url, user.name);
             hasImage = true;
         }
         headerUserButton.title = user.name;
@@ -148,7 +155,8 @@ function updateUserInHeader(user) {
     }
 
     if (!hasImage) {
-        updateHeaderUserButton(null);
+        updateHeaderUserButton(null, user?.name);
+        updateHeaderUserButtonGradient(user);
     }
 
     if (user?.localUser) {
@@ -189,13 +197,48 @@ function updateUserInHeader(user) {
     requiresUserRefresh = false;
 }
 
-function updateHeaderUserButton(src) {
+let headerUserButtonGradientRequestId = 0;
+
+function getHeaderUserId(user) {
+    return user?.Id
+        || user?.id
+        || user?.localUser?.Id
+        || getCurrentApiClient()?.getCurrentUserId?.();
+}
+
+function updateHeaderUserButtonGradient(user) {
+    const requestId = ++headerUserButtonGradientRequestId;
+    const apiClient = getCurrentApiClient();
+    const userId = getHeaderUserId(user);
+
+    if (!apiClient || !userId || !headerUserButton) {
+        return;
+    }
+
+    getCurrentProfileSelector(apiClient).then(selector => {
+        if (requestId !== headerUserButtonGradientRequestId || !headerUserButton) {
+            return;
+        }
+
+        const gradient = getProfileAvatarGradientForUser(selector, userId);
+        headerUserButton.style.background = gradient || '';
+    }).catch(() => {
+        if (requestId === headerUserButtonGradientRequestId && headerUserButton) {
+            headerUserButton.style.background = '';
+        }
+    });
+}
+
+function updateHeaderUserButton(src, name) {
     if (src) {
-        headerUserButton.classList.add('headerUserButtonRound');
-        headerUserButton.innerHTML = '<div class="headerButton headerButtonRight paper-icon-button-light headerUserButtonRound" style="background-image:url(\'' + src + "');\"></div>";
+        headerUserButton.classList.add('headerUserButtonRound', 'headerUserButtonProfile');
+        headerUserButton.style.background = '';
+        headerUserButton.innerHTML = '<div class="headerButton headerButtonRight paper-icon-button-light headerUserButtonRound headerUserImage" style="background-image:url(\'' + src + "');\"></div>";
     } else {
         headerUserButton.classList.remove('headerUserButtonRound');
-        headerUserButton.innerHTML = '<span class="material-icons person" aria-hidden="true"></span>';
+        headerUserButton.classList.add('headerUserButtonProfile');
+        const initial = escapeHtml((name || '').trim().slice(0, 1).toUpperCase() || '?');
+        headerUserButton.innerHTML = '<span class="headerUserInitial" aria-hidden="true">' + initial + '</span>';
     }
 }
 
@@ -241,6 +284,7 @@ function bindMenuEvents() {
 
     headerUserButton.addEventListener('click', onHeaderUserButtonClick);
     headerHomeButton.addEventListener('click', onHeaderHomeButtonClick);
+    jellyflixHeaderBrandButton.addEventListener('click', onHeaderHomeButtonClick);
 
     if (!layoutManager.tv) {
         headerCastButton.addEventListener('click', onCastButtonClicked);
@@ -321,6 +365,7 @@ function onMainDrawerSelect() {
 
 function refreshLibraryInfoInDrawer(user) {
     let html = '';
+    const currentServer = getCurrentApiClient()?.serverInfo?.();
     html += '<div style="height:.5em;"></div>';
     html += `<a is="emby-linkbutton" class="navMenuOption lnkMediaFolder" href="#/home"><span class="material-icons navMenuOptionIcon home" aria-hidden="true"></span><span class="navMenuOptionText">${globalize.translate('Home')}</span></a>`;
 
@@ -350,6 +395,10 @@ function refreshLibraryInfoInDrawer(user) {
             html += `<a is="emby-linkbutton" class="navMenuOption lnkMediaFolder btnSelectServer" data-itemid="selectserver" href="#"><span class="material-icons navMenuOptionIcon storage" aria-hidden="true"></span><span class="navMenuOptionText">${globalize.translate('SelectServer')}</span></a>`;
         }
 
+        if (currentServer?.ProfileSelectorEnabled || user.localUser?.Policy.IsAdministrator) {
+            html += `<a is="emby-linkbutton" class="navMenuOption lnkMediaFolder btnSwitchProfile" data-itemid="switchprofile" href="#"><span class="material-icons navMenuOptionIcon switch_account" aria-hidden="true"></span><span class="navMenuOptionText">${globalize.translate('SwitchProfile')}</span></a>`;
+        }
+
         html += `<a is="emby-linkbutton" class="navMenuOption lnkMediaFolder btnSettings" data-itemid="settings" href="#"><span class="material-icons navMenuOptionIcon settings" aria-hidden="true"></span><span class="navMenuOptionText">${globalize.translate('Settings')}</span></a>`;
         html += `<a is="emby-linkbutton" class="navMenuOption lnkMediaFolder btnLogout" data-itemid="logout" href="#"><span class="material-icons navMenuOptionIcon exit_to_app" aria-hidden="true"></span><span class="navMenuOptionText">${globalize.translate('ButtonSignOut')}</span></a>`;
 
@@ -371,6 +420,11 @@ function refreshLibraryInfoInDrawer(user) {
     const btnSettings = navDrawerScrollContainer.querySelector('.btnSettings');
     if (btnSettings) {
         btnSettings.addEventListener('click', onSettingsClick);
+    }
+
+    const btnSwitchProfile = navDrawerScrollContainer.querySelector('.btnSwitchProfile');
+    if (btnSwitchProfile) {
+        btnSwitchProfile.addEventListener('click', onSwitchProfileClick);
     }
 
     const btnExit = navDrawerScrollContainer.querySelector('.exitApp');
@@ -505,6 +559,10 @@ function onSelectServerClick() {
 
 function onSettingsClick() {
     Dashboard.navigate('mypreferencesmenu');
+}
+
+function onSwitchProfileClick() {
+    Dashboard.navigate('profileselector');
 }
 
 function onExitAppClick() {
@@ -689,6 +747,7 @@ let mainDrawerButton;
 let headerHomeButton;
 let currentDrawerType;
 let documentTitle = 'Jellyfin';
+let jellyflixHeaderBrandButton;
 let pageTitleElement;
 let headerBackButton;
 let headerUserButton;

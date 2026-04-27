@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useState } from 'react';
 import CastConnected from '@mui/icons-material/CastConnected';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
-import Cast from '@mui/icons-material/Cast';
 import IconButton from '@mui/material/IconButton';
 import type {} from '@mui/material/themeCssVarsAugmentation';
 import Tooltip from '@mui/material/Tooltip';
@@ -11,6 +10,7 @@ import { playbackManager } from 'components/playback/playbackmanager';
 import globalize from 'lib/globalize';
 import Events from 'utils/events';
 
+import { JellyflixCastIcon } from './JellyflixIcons';
 import RemotePlayMenu, { ID } from './menus/RemotePlayMenu';
 import RemotePlayActiveMenu, { ID as ACTIVE_ID } from './menus/RemotePlayActiveMenu';
 
@@ -88,7 +88,7 @@ const RemotePlayButton = () => {
                         onClick={onRemotePlayButtonClick}
                         color='inherit'
                     >
-                        <Cast />
+                        <JellyflixCastIcon />
                     </IconButton>
                 </Tooltip>
             )}

@@ -14,6 +14,7 @@ import Profile from 'apps/dashboard/features/users/components/Profile';
 import Access from 'apps/dashboard/features/users/components/Access';
 import ParentalControl from 'apps/dashboard/features/users/components/ParentalControl';
 import Password from 'apps/dashboard/features/users/components/Password';
+import Profiles from 'apps/dashboard/features/users/components/Profiles';
 import Alert from '@mui/material/Alert';
 
 export const Component = () => {
@@ -23,7 +24,7 @@ export const Component = () => {
 
     const handleTabChange = useCallback((event: React.SyntheticEvent, newValue: UserTab) => {
         navigate(`/dashboard/users/${userId}/${newValue}`);
-    }, [ navigate ]);
+    }, [ navigate, userId ]);
 
     if (isPending) return <Loading />;
 
@@ -45,6 +46,7 @@ export const Component = () => {
                         <Typography variant='h1'>{user.Name}</Typography>
                         <Tabs value={tab} onChange={handleTabChange}>
                             <Tab label={globalize.translate('Profile')} value={UserTab.Profile} />
+                            <Tab label={globalize.translate('ProfileSelectorProfilesTab')} value={UserTab.Profiles} />
                             <Tab label={globalize.translate('TabAccess')} value={UserTab.Access} />
                             <Tab label={globalize.translate('TabParentalControl')} value={UserTab.ParentalControl} />
                             <Tab label={globalize.translate('HeaderPassword')} value={UserTab.Password} />
@@ -52,6 +54,9 @@ export const Component = () => {
 
                         {tab == UserTab.Profile && (
                             <Profile userDto={user} />
+                        )}
+                        {tab == UserTab.Profiles && user.Id && (
+                            <Profiles ownerUserId={user.Id} />
                         )}
                         {tab == UserTab.Access && (
                             <Access userId={user.Id || ''} />

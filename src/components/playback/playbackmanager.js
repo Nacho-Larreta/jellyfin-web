@@ -1941,7 +1941,7 @@ export class PlaybackManager {
                     MediaTypes: 'Photo',
                     Limit: UNLIMITED_ITEMS
                 }, queryOptions));
-            } else if (firstItem.IsFolder && firstItem.CollectionType === 'musicvideos') {
+            } else if (firstItem.IsFolder && ['musicvideos', 'courses', 'adultvideos'].includes(firstItem.CollectionType)) {
                 return getItemsForPlayback(serverId, mergePlaybackQueries({
                     ParentId: firstItem.Id,
                     Filters: 'IsNotFolder',

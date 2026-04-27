@@ -1,4 +1,5 @@
 import globalize from 'lib/globalize';
+import { JellyflixCollectionType } from 'constants/jellyflixCollectionTypes';
 
 const getCollectionTypeOptions = () => {
     return [{
@@ -22,6 +23,12 @@ const getCollectionTypeOptions = () => {
     }, {
         name: globalize.translate('MusicVideos'),
         value: 'musicvideos'
+    }, {
+        name: globalize.translate('Courses'),
+        value: JellyflixCollectionType.Courses
+    }, {
+        name: globalize.translate('AdultVideos'),
+        value: JellyflixCollectionType.AdultVideos
     }, {
         name: globalize.translate('MixedMoviesShows'),
         value: 'mixed'

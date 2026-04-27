@@ -33,12 +33,36 @@ export const Component = () => {
         <>
             <Box sx={{ position: 'relative', display: 'flex', height: '100%' }}>
                 <StrictMode>
-                    <ElevationScroll elevate={false}>
+                    <ElevationScroll
+                        elevate={false}
+                        threshold={60}
+                    >
                         <AppBar
                             position='fixed'
                             sx={{
-                                width: '100%',
-                                ml: 0
+                                left: 0,
+                                right: 0,
+                                width: '100vw',
+                                height: {
+                                    xs: '64px',
+                                    md: '68px'
+                                },
+                                ml: 0,
+                                color: '#fff',
+                                background: 'linear-gradient(180deg, rgba(0, 0, 0, 0.7) 0%, rgba(0, 0, 0, 0) 100%)',
+                                borderBottom: '1px solid transparent',
+                                boxShadow: 'none',
+                                transition: 'background 250ms cubic-bezier(0.4, 0, 0.2, 1), border-color 250ms cubic-bezier(0.4, 0, 0.2, 1)',
+                                '&.MuiAppBar-colorDefault': {
+                                    background: 'rgba(20, 20, 20, 0.96)',
+                                    borderBottomColor: 'rgba(255, 255, 255, 0.06)',
+                                    boxShadow: 'none'
+                                },
+                                '&.MuiAppBar-colorTransparent': {
+                                    background: 'linear-gradient(180deg, rgba(0, 0, 0, 0.7) 0%, rgba(0, 0, 0, 0) 100%)',
+                                    borderBottomColor: 'transparent',
+                                    boxShadow: 'none'
+                                }
                             }}
                         >
                             <AppToolbar

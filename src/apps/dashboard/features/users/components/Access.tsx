@@ -7,6 +7,7 @@ import Button from 'elements/emby-button/Button';
 import AccessContainer from 'components/dashboard/users/AccessContainer';
 import CheckBoxElement from 'elements/CheckBoxElement';
 import Toast from 'apps/dashboard/components/Toast';
+import { isAdultVideosCollectionType } from 'constants/jellyflixCollectionTypes';
 
 interface AccessProps {
     userId: string;
@@ -15,6 +16,7 @@ interface AccessProps {
 type ItemsArr = {
     Name?: string | null;
     Id?: string | null;
+    CollectionType?: string | null;
     AppName?: string | null;
     CustomName?: string | null;
     checkedAttribute?: string
@@ -49,11 +51,16 @@ const Access = ({ userId }: AccessProps) => {
         const itemsArr: ItemsArr[] = [];
 
         for (const folder of mediaFolders) {
-            const isChecked = user.Policy?.EnableAllFolders || user.Policy?.EnabledFolders?.indexOf(folder.Id || '') != -1;
+            const isExplicitAdultFolder = isAdultVideosCollectionType(folder.CollectionType);
+            const isFolderExplicitlyEnabled = user.Policy?.EnabledFolders?.indexOf(folder.Id || '') != -1;
+            const isChecked = isExplicitAdultFolder ?
+                isFolderExplicitlyEnabled :
+                user.Policy?.EnableAllFolders || isFolderExplicitlyEnabled;
             const checkedAttribute = isChecked ? ' checked="checked"' : '';
             itemsArr.push({
                 Id: folder.Id,
                 Name: folder.Name,
+                CollectionType: folder.CollectionType,
                 checkedAttribute: checkedAttribute
             });
         }
@@ -63,6 +70,9 @@ const Access = ({ userId }: AccessProps) => {
         const chkEnableAllFolders = page.querySelector('.chkEnableAllFolders') as HTMLInputElement;
         chkEnableAllFolders.checked = Boolean(user.Policy?.EnableAllFolders);
         triggerChange(chkEnableAllFolders);
+
+        const hasExplicitAccessFolders = itemsArr.some(item => isAdultVideosCollectionType(item.CollectionType));
+        (page.querySelector('.folderAccessListContainer') as HTMLDivElement).classList.toggle('hide', chkEnableAllFolders.checked && !hasExplicitAccessFolders);
     }, []);
 
     const loadChannels = useCallback((user: UserDto, channels: BaseItemDto[]) => {
@@ -193,7 +203,11 @@ const Access = ({ userId }: AccessProps) => {
             }
 
             user.Policy.EnableAllFolders = (page.querySelector('.chkEnableAllFolders') as HTMLInputElement).checked;
-            user.Policy.EnabledFolders = user.Policy.EnableAllFolders ? [] : Array.prototype.filter.call(page.querySelectorAll('.chkFolder'), function (c) {
+            user.Policy.EnabledFolders = Array.prototype.filter.call(page.querySelectorAll('.chkFolder'), function (c) {
+                if (user.Policy?.EnableAllFolders) {
+                    return c.checked && isAdultVideosCollectionType(c.getAttribute('data-itemtype'));
+                }
+
                 return c.checked;
             }).map(function (c) {
                 return c.getAttribute('data-id');
@@ -233,7 +247,8 @@ const Access = ({ userId }: AccessProps) => {
         });
 
         (page.querySelector('.chkEnableAllFolders') as HTMLInputElement).addEventListener('change', function (this: HTMLInputElement) {
-            (page.querySelector('.folderAccessListContainer') as HTMLDivElement).classList.toggle('hide', this.checked);
+            const hasExplicitAccessFolders = Boolean(page.querySelector('.chkFolder[data-itemtype="adultvideos"]'));
+            (page.querySelector('.folderAccessListContainer') as HTMLDivElement).classList.toggle('hide', this.checked && !hasExplicitAccessFolders);
         });
 
         (page.querySelector('.userLibraryAccessForm') as HTMLFormElement).addEventListener('submit', onSubmit);
@@ -262,6 +277,7 @@ const Access = ({ userId }: AccessProps) => {
                             key={Item.Id}
                             className='chkFolder'
                             itemId={Item.Id}
+                            itemType={Item.CollectionType || undefined}
                             itemName={Item.Name}
                             itemCheckedAttribute={Item.checkedAttribute}
                         />

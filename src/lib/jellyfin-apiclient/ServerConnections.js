@@ -136,6 +136,87 @@ class ServerConnections extends ConnectionManager {
         return apiClient;
     }
 
+    getSavedServer(serverId) {
+        return credentialProvider.credentials().Servers.find(server => server.Id === serverId) || null;
+    }
+
+    updateSavedServer(serverId, updater) {
+        const credentials = credentialProvider.credentials();
+        const server = credentials.Servers.find(savedServer => savedServer.Id === serverId);
+
+        if (!server) {
+            return null;
+        }
+
+        updater(server);
+        credentialProvider.credentials(credentials);
+
+        return server;
+    }
+
+    cacheOwnerSession(serverId, ownerUserId, ownerAccessToken) {
+        if (!serverId || !ownerUserId || !ownerAccessToken) {
+            return;
+        }
+
+        this.updateSavedServer(serverId, server => {
+            server.OwnerUserId = ownerUserId;
+            server.OwnerAccessToken = ownerAccessToken;
+        });
+    }
+
+    setProfileSelectorAvailability(serverId, isEnabled) {
+        if (!serverId) {
+            return;
+        }
+
+        this.updateSavedServer(serverId, server => {
+            server.ProfileSelectorEnabled = !!isEnabled;
+        });
+    }
+
+    async applyAuthenticationResult(serverId, authenticationResult) {
+        if (!serverId || !authenticationResult?.AccessToken || !authenticationResult?.User?.Id) {
+            throw new Error('[ServerConnection] Invalid profile selector authentication result');
+        }
+
+        const server = this.updateSavedServer(serverId, savedServer => {
+            savedServer.UserId = authenticationResult.User.Id;
+            savedServer.AccessToken = authenticationResult.AccessToken;
+            savedServer.DateLastAccessed = new Date().getTime();
+
+            if (!savedServer.OwnerUserId) {
+                savedServer.OwnerUserId = authenticationResult.User.Id;
+            }
+
+            if (!savedServer.OwnerAccessToken && savedServer.OwnerUserId === authenticationResult.User.Id) {
+                savedServer.OwnerAccessToken = authenticationResult.AccessToken;
+            }
+        });
+
+        if (!server) {
+            throw new Error(`[ServerConnection] Saved server not found: ${serverId}`);
+        }
+
+        const apiClient = this.getOrCreateApiClient(serverId);
+        apiClient.closeWebSocket();
+        apiClient.serverInfo(server);
+        apiClient.setAuthenticationInfo(authenticationResult.AccessToken, authenticationResult.User.Id);
+        apiClient.ensureWebSocket();
+
+        this.setLocalApiClient(apiClient);
+
+        const user = {
+            ...authenticationResult.User,
+            ServerId: serverId
+        };
+
+        await this.onLocalUserSignedIn(user);
+        Events.trigger(this, 'localusersignedin', [user]);
+
+        return apiClient;
+    }
+
     onLocalUserSignedIn(user) {
         const apiClient = this.getApiClient(user.ServerId);
         this.setLocalApiClient(apiClient);

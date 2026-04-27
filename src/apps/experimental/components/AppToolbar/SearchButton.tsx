@@ -6,10 +6,11 @@ import {
     useLocation,
     useSearchParams
 } from 'react-router-dom';
-import SearchIcon from '@mui/icons-material/Search';
 import IconButton from '@mui/material/IconButton';
 import Tooltip from '@mui/material/Tooltip';
 import globalize from 'lib/globalize';
+
+import { JellyflixSearchIcon } from './JellyflixIcons';
 
 const getUrlParams = (searchParams: URLSearchParams) => {
     const parentId =
@@ -49,7 +50,7 @@ const SearchButton: FC = () => {
                 disabled={isSearchPath}
                 to={createSearchLink}
             >
-                <SearchIcon />
+                <JellyflixSearchIcon />
             </IconButton>
         </Tooltip>
     );

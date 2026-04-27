@@ -6,6 +6,7 @@ import { appRouter, PUBLIC_PATHS } from 'components/router/appRouter';
 import AppToolbar from 'components/toolbar/AppToolbar';
 import ServerButton from 'components/toolbar/ServerButton';
 
+import NotificationButton from './NotificationButton';
 import RemotePlayButton from './RemotePlayButton';
 import SyncPlayButton from './SyncPlayButton';
 import SearchButton from './SearchButton';
@@ -37,9 +38,10 @@ const ExperimentalAppToolbar: FC<AppToolbarProps> = ({
         <AppToolbar
             buttons={!isPublicPath && (
                 <>
+                    <SearchButton />
                     <SyncPlayButton />
                     <RemotePlayButton />
-                    <SearchButton />
+                    <NotificationButton />
                 </>
             )}
             isDrawerAvailable={isDrawerAvailable}
@@ -50,8 +52,15 @@ const ExperimentalAppToolbar: FC<AppToolbarProps> = ({
         >
             {!isDrawerAvailable && (
                 <Stack
+                    className='jellyflixToolbarNav'
                     direction='row'
-                    spacing={0.5}
+                    spacing={0}
+                    sx={{
+                        alignItems: 'center',
+                        gap: '26px',
+                        minWidth: 0,
+                        overflow: 'hidden'
+                    }}
                 >
                     <ServerButton />
 

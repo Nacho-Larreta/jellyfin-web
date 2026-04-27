@@ -323,6 +323,8 @@ export default class ConnectionManager {
                     server.UserId = null;
                     server.AccessToken = null;
                     server.ExchangeToken = null;
+                    server.OwnerUserId = null;
+                    server.OwnerAccessToken = null;
                 }
             });
         };

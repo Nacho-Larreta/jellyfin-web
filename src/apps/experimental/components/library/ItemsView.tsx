@@ -43,7 +43,7 @@ interface ItemsViewProps {
     viewType: LibraryTab;
     parentId: ParentId;
     itemType: BaseItemKind[];
-    collectionType?: CollectionType;
+    collectionType?: CollectionType | string;
     isPaginationEnabled?: boolean;
     isBtnPlayAllEnabled?: boolean;
     isBtnQueueEnabled?: boolean;

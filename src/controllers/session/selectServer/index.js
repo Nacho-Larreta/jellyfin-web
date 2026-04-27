@@ -20,6 +20,7 @@ import Dashboard from '../../../utils/dashboard';
 import alert from '../../../components/alert';
 import { getDefaultBackgroundClass } from '../../../components/cardbuilder/utils/builder';
 import { ConnectionState, ServerConnections } from 'lib/jellyfin-apiclient';
+import { resolveProfileSelectorRoute } from 'lib/profileSelector/navigation';
 
 const enableFocusTransform = !browser.slow && !browser.edge;
 
@@ -113,8 +114,15 @@ export default function (view, params) {
 
             switch (result.State) {
                 case ConnectionState.SignedIn:
-                    Dashboard.onServerChanged(apiClient.getCurrentUserId(), apiClient.accessToken(), apiClient);
-                    Dashboard.navigate('home');
+                    resolveProfileSelectorRoute(apiClient, '/home').then(targetUrl => {
+                        const activeApiClient = ServerConnections.currentApiClient() || apiClient;
+                        Dashboard.onServerChanged(activeApiClient.getCurrentUserId(), activeApiClient.accessToken(), activeApiClient);
+                        Dashboard.navigate(targetUrl);
+                    }).catch(err => {
+                        console.warn('[selectServer] unable to resolve profile selector route', err);
+                        Dashboard.onServerChanged(apiClient.getCurrentUserId(), apiClient.accessToken(), apiClient);
+                        Dashboard.navigate('home');
+                    });
                     break;
 
                 case ConnectionState.ServerSignIn:

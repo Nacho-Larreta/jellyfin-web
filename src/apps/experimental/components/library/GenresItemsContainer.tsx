@@ -9,7 +9,7 @@ import type { ParentId } from 'types/library';
 
 interface GenresItemsContainerProps {
     parentId: ParentId;
-    collectionType: CollectionType | undefined;
+    collectionType: CollectionType | string | undefined;
     itemType: BaseItemKind[];
 }
 

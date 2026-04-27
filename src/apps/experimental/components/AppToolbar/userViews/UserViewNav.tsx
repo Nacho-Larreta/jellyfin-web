@@ -1,36 +1,55 @@
 import type { BaseItemDto } from '@jellyfin/sdk/lib/generated-client/models/base-item-dto';
 import { BaseItemKind } from '@jellyfin/sdk/lib/generated-client/models/base-item-kind';
 import { CollectionType } from '@jellyfin/sdk/lib/generated-client/models/collection-type';
-import ArrowDropDown from '@mui/icons-material/ArrowDropDown';
-import Favorite from '@mui/icons-material/Favorite';
 import Button from '@mui/material/Button/Button';
 import Icon from '@mui/material/Icon';
 import { Theme } from '@mui/material/styles';
 import useMediaQuery from '@mui/material/useMediaQuery';
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useMemo } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router-dom';
 
-import LibraryIcon from 'apps/experimental/components/LibraryIcon';
 import { MetaView } from 'apps/experimental/constants/metaView';
 import { useAncestors } from 'apps/experimental/features/libraries/hooks/api/useAncestors';
 import { isDetailsPath, isLibraryPath } from 'apps/experimental/features/libraries/utils/path';
 import { appRouter } from 'components/router/appRouter';
+import { JellyflixCollectionType } from 'constants/jellyflixCollectionTypes';
 import { useApi } from 'hooks/useApi';
 import useCurrentTab from 'hooks/useCurrentTab';
 import { useUserViews } from 'hooks/useUserViews';
 import { useWebConfig } from 'hooks/useWebConfig';
 import globalize from 'lib/globalize';
 
-import UserViewsMenu from './UserViewsMenu';
-
 const MAX_USER_VIEWS_MD = 3;
 const MAX_USER_VIEWS_LG = 5;
 const MAX_USER_VIEWS_XL = 8;
 
-const OVERFLOW_MENU_ID = 'user-view-overflow-menu';
-
 const HOME_PATH = '/home';
 const LIST_PATH = '/list';
+const PRIMARY_COLLECTION_TYPES = [
+    CollectionType.Movies,
+    CollectionType.Tvshows,
+    JellyflixCollectionType.Courses,
+    JellyflixCollectionType.AdultVideos
+];
+
+const getViewRoute = (view: BaseItemDto) => appRouter.getRouteUrl(view, { context: view.CollectionType }).substring(1);
+
+const isCollectionView = (view: BaseItemDto, collectionType: string) => (
+    view.CollectionType === collectionType
+        || getViewRoute(view).includes(`collectionType=${collectionType}`)
+);
+
+const findCollectionView = (views: BaseItemDto[] | undefined, collectionType: string) => (
+    views?.find(view => isCollectionView(view, collectionType))
+);
+
+const getRecentlyAddedRoute = (view: BaseItemDto | undefined) => {
+    if (!view) return '/home';
+
+    const route = getViewRoute(view);
+    const separator = route.includes('?') ? '&' : '?';
+    return `${route}${separator}tab=1`;
+};
 
 const getCurrentUserView = (
     userViews: BaseItemDto[] | undefined,
@@ -93,24 +112,31 @@ const UserViewNav = () => {
         userViews?.Items?.slice(0, maxViews)
     ), [ maxViews, userViews ]);
 
-    const overflowViews = useMemo(() => (
-        userViews?.Items?.slice(maxViews)
-    ), [ maxViews, userViews ]);
+    const moviesView = useMemo(() => (
+        findCollectionView(primaryViews, CollectionType.Movies)
+            || findCollectionView(userViews?.Items, CollectionType.Movies)
+    ), [ primaryViews, userViews ]);
 
-    const [ overflowAnchorEl, setOverflowAnchorEl ] = useState<null | HTMLElement>(null);
-    const isOverflowMenuOpen = Boolean(overflowAnchorEl);
+    const seriesView = useMemo(() => (
+        findCollectionView(primaryViews, CollectionType.Tvshows)
+            || findCollectionView(userViews?.Items, CollectionType.Tvshows)
+    ), [ primaryViews, userViews ]);
 
-    const onOverflowButtonClick = useCallback((event: React.MouseEvent<HTMLElement>) => {
-        setOverflowAnchorEl(event.currentTarget);
-    }, []);
+    const coursesView = useMemo(() => (
+        findCollectionView(primaryViews, JellyflixCollectionType.Courses)
+            || findCollectionView(userViews?.Items, JellyflixCollectionType.Courses)
+    ), [ primaryViews, userViews ]);
 
-    const onOverflowMenuClose = useCallback(() => {
-        setOverflowAnchorEl(null);
-    }, []);
+    const adultVideosView = useMemo(() => (
+        findCollectionView(primaryViews, JellyflixCollectionType.AdultVideos)
+            || findCollectionView(userViews?.Items, JellyflixCollectionType.AdultVideos)
+    ), [ primaryViews, userViews ]);
 
     const currentUserView = useMemo(() => (
         getCurrentUserView(userViews?.Items, location.pathname, libraryId || ancestorLibraryId, collectionType, activeTab)
     ), [ activeTab, collectionType, libraryId, ancestorLibraryId, location.pathname, userViews ]);
+    const isHomeActive = location.pathname === HOME_PATH && activeTab !== 1 && !currentUserView;
+    const isMyListActive = currentUserView?.Id === MetaView.Favorites.Id;
 
     if (isPending) return null;
 
@@ -118,12 +144,83 @@ const UserViewNav = () => {
         <>
             <Button
                 variant='text'
-                color={(currentUserView?.Id === MetaView.Favorites.Id) ? 'primary' : 'inherit'}
-                startIcon={<Favorite />}
+                color='inherit'
+                className={isHomeActive ? 'jellyflixToolbarNavItemActive' : undefined}
+                component={Link}
+                to='/home'
+            >
+                {globalize.translate('Home')}
+            </Button>
+
+            {moviesView && (
+                <Button
+                    key={moviesView.Id}
+                    variant='text'
+                    color={(moviesView.Id === currentUserView?.Id) ? 'primary' : 'inherit'}
+                    className={(moviesView.Id === currentUserView?.Id) ? 'jellyflixToolbarNavItemActive' : undefined}
+                    component={Link}
+                    to={getViewRoute(moviesView)}
+                >
+                    {globalize.translate('Movies')}
+                </Button>
+            )}
+
+            {seriesView && (
+                <Button
+                    key={seriesView.Id}
+                    variant='text'
+                    color={(seriesView.Id === currentUserView?.Id) ? 'primary' : 'inherit'}
+                    className={(seriesView.Id === currentUserView?.Id) ? 'jellyflixToolbarNavItemActive' : undefined}
+                    component={Link}
+                    to={getViewRoute(seriesView)}
+                >
+                    {globalize.translate('Series')}
+                </Button>
+            )}
+
+            {coursesView && (
+                <Button
+                    key={coursesView.Id}
+                    variant='text'
+                    color={(coursesView.Id === currentUserView?.Id) ? 'primary' : 'inherit'}
+                    className={(coursesView.Id === currentUserView?.Id) ? 'jellyflixToolbarNavItemActive' : undefined}
+                    component={Link}
+                    to={getViewRoute(coursesView)}
+                >
+                    {globalize.translate('Courses')}
+                </Button>
+            )}
+
+            {adultVideosView && (
+                <Button
+                    key={adultVideosView.Id}
+                    variant='text'
+                    color={(adultVideosView.Id === currentUserView?.Id) ? 'primary' : 'inherit'}
+                    className={(adultVideosView.Id === currentUserView?.Id) ? 'jellyflixToolbarNavItemActive' : undefined}
+                    component={Link}
+                    to={getViewRoute(adultVideosView)}
+                >
+                    {globalize.translate('AdultVideos')}
+                </Button>
+            )}
+
+            <Button
+                variant='text'
+                color={isMyListActive ? 'primary' : 'inherit'}
+                className={isMyListActive ? 'jellyflixToolbarNavItemActive' : undefined}
                 component={Link}
                 to='/home?tab=1'
             >
-                {globalize.translate(MetaView.Favorites.Name)}
+                Mi lista
+            </Button>
+
+            <Button
+                variant='text'
+                color='inherit'
+                component={Link}
+                to={getRecentlyAddedRoute(moviesView || seriesView)}
+            >
+                Recién agregado
             </Button>
 
             {webConfig.menuLinks?.map(link => (
@@ -140,42 +237,20 @@ const UserViewNav = () => {
                     {link.name}
                 </Button>
             ))}
-
-            {primaryViews?.map(view => (
+            {primaryViews?.filter(view => (
+                !PRIMARY_COLLECTION_TYPES.some(primaryCollectionType => isCollectionView(view, primaryCollectionType))
+            )).map(link => (
                 <Button
-                    key={view.Id}
+                    key={link.Id}
                     variant='text'
-                    color={(view.Id === currentUserView?.Id) ? 'primary' : 'inherit'}
-                    startIcon={<LibraryIcon item={view} />}
+                    color='inherit'
                     component={Link}
-                    to={appRouter.getRouteUrl(view, { context: view.CollectionType }).substring(1)}
+                    to={getViewRoute(link)}
+                    sx={{ display: { xs: 'none', xl: 'inline-flex' } }}
                 >
-                    {view.Name}
+                    {link.Name}
                 </Button>
             ))}
-            {overflowViews && overflowViews.length > 0 && (
-                <>
-                    <Button
-                        variant='text'
-                        color='inherit'
-                        endIcon={<ArrowDropDown />}
-                        aria-controls={OVERFLOW_MENU_ID}
-                        aria-haspopup='true'
-                        onClick={onOverflowButtonClick}
-                    >
-                        {globalize.translate('ButtonMore')}
-                    </Button>
-
-                    <UserViewsMenu
-                        anchorEl={overflowAnchorEl}
-                        id={OVERFLOW_MENU_ID}
-                        open={isOverflowMenuOpen}
-                        onMenuClose={onOverflowMenuClose}
-                        userViews={overflowViews}
-                        selectedId={currentUserView?.Id}
-                    />
-                </>
-            )}
         </>
     );
 };

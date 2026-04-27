@@ -2,6 +2,7 @@
 import escapeHtml from 'escape-html';
 
 import { getUserViewsQuery } from 'hooks/useUserViews';
+import { JellyflixCollectionType } from 'constants/jellyflixCollectionTypes';
 import { ServerConnections } from 'lib/jellyfin-apiclient';
 import { toApi } from 'utils/jellyfin-apiclient/compat';
 import { queryClient } from 'utils/query/queryClient';
@@ -183,6 +184,42 @@ function getLandingScreenOptions(type) {
                 value: LibraryTab.Videos
             }
         );
+    } else if (type === JellyflixCollectionType.Courses) {
+        list.push(
+            {
+                name: globalize.translate('HeaderVideos'),
+                value: LibraryTab.Videos,
+                isDefault: true
+            },
+            {
+                name: globalize.translate('Folders'),
+                value: LibraryTab.Folders
+            },
+            {
+                name: globalize.translate('Favorites'),
+                value: LibraryTab.Favorites
+            },
+            {
+                name: globalize.translate('Genres'),
+                value: LibraryTab.Genres
+            }
+        );
+    } else if (type === JellyflixCollectionType.AdultVideos) {
+        list.push(
+            {
+                name: globalize.translate('HeaderVideos'),
+                value: LibraryTab.Videos,
+                isDefault: true
+            },
+            {
+                name: globalize.translate('Folders'),
+                value: LibraryTab.Folders
+            },
+            {
+                name: globalize.translate('Favorites'),
+                value: LibraryTab.Favorites
+            }
+        );
     }
 
     return list;
@@ -276,7 +313,7 @@ function getPerLibrarySettingsHtml(item, user, userSettings) {
         html = `<div class="checkboxListContainer">${html}</div>`;
     }
 
-    const landingScreenTypes = ['movies', 'tvshows', 'music', 'livetv', 'homevideos'];
+    const landingScreenTypes = ['movies', 'tvshows', 'music', 'livetv', 'homevideos', JellyflixCollectionType.Courses, JellyflixCollectionType.AdultVideos];
     if (landingScreenTypes.includes(item.CollectionType)) {
         const idForLanding = item.CollectionType === 'livetv' ? item.CollectionType : item.Id;
         html += '<div class="selectContainer">';

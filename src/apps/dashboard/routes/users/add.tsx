@@ -10,6 +10,7 @@ import AccessContainer from '../../../../components/dashboard/users/AccessContai
 import CheckBoxElement from '../../../../elements/CheckBoxElement';
 import Page from '../../../../components/Page';
 import Toast from 'apps/dashboard/components/Toast';
+import { isAdultVideosCollectionType } from 'constants/jellyflixCollectionTypes';
 
 import { useLibraryMediaFolders } from 'apps/dashboard/features/users/api/useLibraryMediaFolders';
 import { useChannels } from 'apps/dashboard/features/users/api/useChannels';
@@ -20,6 +21,7 @@ import { useNavigate } from 'react-router-dom';
 type ItemsArr = {
     Name?: string | null;
     Id?: string;
+    CollectionType?: string | null;
 };
 
 const UserNew = () => {
@@ -42,7 +44,8 @@ const UserNew = () => {
         return items.map(item =>
             ({
                 Id: item.Id,
-                Name: item.Name
+                Name: item.Name,
+                CollectionType: item.CollectionType
             })
         );
     };
@@ -134,15 +137,15 @@ const UserNew = () => {
                     }
 
                     user.Policy.EnableAllFolders = (page.querySelector('.chkEnableAllFolders') as HTMLInputElement).checked;
-                    user.Policy.EnabledFolders = [];
+                    user.Policy.EnabledFolders = Array.prototype.filter.call(page.querySelectorAll('.chkFolder'), function (i) {
+                        if (user.Policy?.EnableAllFolders) {
+                            return i.checked && isAdultVideosCollectionType(i.getAttribute('data-itemtype'));
+                        }
 
-                    if (!user.Policy.EnableAllFolders) {
-                        user.Policy.EnabledFolders = Array.prototype.filter.call(page.querySelectorAll('.chkFolder'), function (i) {
-                            return i.checked;
-                        }).map(function (i) {
-                            return i.getAttribute('data-id');
-                        });
-                    }
+                        return i.checked;
+                    }).map(function (i) {
+                        return i.getAttribute('data-id');
+                    });
 
                     user.Policy.EnableAllChannels = (page.querySelector('.chkEnableAllChannels') as HTMLInputElement).checked;
                     user.Policy.EnabledChannels = [];
@@ -186,7 +189,8 @@ const UserNew = () => {
 
         const enableAllFoldersChange = function (this: HTMLInputElement) {
             const folderAccessListContainer = page.querySelector('.folderAccessListContainer') as HTMLDivElement;
-            this.checked ? folderAccessListContainer.classList.add('hide') : folderAccessListContainer.classList.remove('hide');
+            const hasExplicitAccessFolders = Boolean(page.querySelector('.chkFolder[data-itemtype="adultvideos"]'));
+            folderAccessListContainer.classList.toggle('hide', this.checked && !hasExplicitAccessFolders);
         };
 
         const onCancelClick = () => {
@@ -254,6 +258,7 @@ const UserNew = () => {
                                 key={Item.Id}
                                 className='chkFolder'
                                 itemId={Item.Id}
+                                itemType={Item.CollectionType || undefined}
                                 itemName={Item.Name}
                             />
                         ))}

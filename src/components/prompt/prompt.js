@@ -20,6 +20,26 @@ export default (() => {
             txtInput.setAttribute('label', options.label || '');
         }
         txtInput.value = options.value || '';
+        txtInput.type = options.inputType || 'text';
+        txtInput.inputMode = options.inputMode || '';
+
+        if (options.maxLength) {
+            txtInput.maxLength = options.maxLength;
+        } else {
+            txtInput.removeAttribute('maxlength');
+        }
+
+        if (options.autocomplete) {
+            txtInput.autocomplete = options.autocomplete;
+        } else {
+            txtInput.removeAttribute('autocomplete');
+        }
+
+        if (options.pattern) {
+            txtInput.pattern = options.pattern;
+        } else {
+            txtInput.removeAttribute('pattern');
+        }
     }
 
     function showDialog(options) {

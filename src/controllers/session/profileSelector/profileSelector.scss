@@ -1,0 +1,525 @@
+.profileSelectorPage {
+    --profile-selector-header-height: 68px;
+    --profile-selector-panel: rgb(14 16 20 / 82%);
+    --profile-selector-panel-border: rgb(255 255 255 / 8%);
+    --profile-selector-card: rgb(255 255 255 / 4%);
+    --profile-selector-card-hover: rgb(255 255 255 / 8%);
+    --profile-selector-text-muted: rgb(255 255 255 / 58%);
+    --profile-selector-outline: rgb(255 255 255 / 12%);
+    --profile-selector-card-size: clamp(172px, 11.5vw, 240px);
+
+    overflow: hidden;
+    min-height: 100dvh;
+    background: radial-gradient(ellipse at top, #1a1a1a 0%, #0a0a0a 50%, #000 100%);
+}
+
+.profileSelectorPage.standalonePage {
+    padding-top: 0 !important;
+}
+
+html.profileSelectorViewportLocked,
+html.profileSelectorViewportLocked body,
+html.profileSelectorViewportLocked .mainAnimatedPages {
+    overflow: hidden !important;
+}
+
+.profileSelectorShell {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    box-sizing: border-box;
+    width: 100%;
+    height: 100dvh;
+    min-height: 100dvh;
+    padding: calc(var(--profile-selector-header-height) + env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) max(28px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left));
+}
+
+.profileSelectorContent {
+    width: 100%;
+    max-width: 1680px;
+    margin: 0 auto;
+    text-align: center;
+    transform: translateY(-1.4vh);
+}
+
+.profileSelectorTitle {
+    margin: 0;
+    color: #fff;
+    font-size: clamp(3rem, 4.2vw, 5rem);
+    font-weight: 500;
+    letter-spacing: -0.015em;
+    line-height: 1;
+}
+
+.profileSelectorSubtitle {
+    min-height: 1.5rem;
+    margin: clamp(0.75rem, 1.5vh, 1.2rem) 0 clamp(2rem, 4vh, 3.2rem);
+    color: rgb(255 255 255 / 44%);
+    font-size: clamp(0.95rem, 1vw, 1.08rem);
+}
+
+.profileSelectorCards {
+    display: flex;
+    flex-wrap: wrap;
+    gap: clamp(1.5rem, 2.35vw, 2.25rem);
+    align-items: flex-start;
+    justify-content: center;
+    overflow: visible;
+}
+
+.profileSelectorCard {
+    display: flex;
+    flex-direction: column;
+    width: var(--profile-selector-card-size);
+    gap: 1rem;
+    border: 0;
+    border-radius: 0;
+    padding: 0;
+    background: transparent;
+    text-align: center;
+    cursor: pointer;
+    transition: opacity 160ms ease;
+}
+
+.profileSelectorCard.card,
+.profileSelectorCard.card:not(.show-animation) {
+    overflow: visible;
+    contain: layout style !important;
+}
+
+.profileSelectorCard:hover,
+.profileSelectorCard:focus {
+    z-index: 2 !important;
+}
+
+.profileSelectorCard:focus-visible {
+    outline: 0;
+}
+
+.profileSelectorCardFrame {
+    position: relative;
+    overflow: visible;
+    border-radius: 8px;
+    aspect-ratio: 1 / 1;
+    background: var(--profile-selector-card);
+    box-shadow: 0 2px 8px rgb(0 0 0 / 45%);
+    transition: box-shadow 180ms ease, filter 180ms ease;
+}
+
+.profileSelectorCardFrame::after {
+    position: absolute;
+    z-index: 3;
+    inset: -7px;
+    border: 3px solid #fff;
+    border-radius: 13px;
+    box-shadow: 0 0 0 2px rgb(0 0 0 / 88%), 0 12px 40px rgb(0 0 0 / 60%);
+    content: "";
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 140ms ease;
+}
+
+.profileSelectorCard:hover .profileSelectorCardFrame,
+.profileSelectorCard:focus .profileSelectorCardFrame,
+.profileSelectorCard:focus-visible .profileSelectorCardFrame {
+    box-shadow: 0 12px 40px rgb(0 0 0 / 60%);
+    filter: brightness(1.05);
+}
+
+.profileSelectorCard:hover .profileSelectorCardFrame::after,
+.profileSelectorCard:focus .profileSelectorCardFrame::after,
+.profileSelectorCard:focus-visible .profileSelectorCardFrame::after {
+    opacity: 1;
+}
+
+.profileSelectorCardAvatar {
+    overflow: hidden;
+    width: 100%;
+    height: 100%;
+    border-radius: inherit;
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: cover;
+}
+
+.profileSelectorCardAvatar.defaultCardBackground1 {
+    background: linear-gradient(135deg, #d51f28 0%, #8f1017 100%);
+}
+
+.profileSelectorCardAvatar.defaultCardBackground2 {
+    background: linear-gradient(135deg, #4cb7f5 0%, #176c9f 100%);
+}
+
+.profileSelectorCardAvatar.defaultCardBackground3 {
+    background: linear-gradient(135deg, #9d4edd 0%, #4f1d75 100%);
+}
+
+.profileSelectorCardAvatar.defaultCardBackground4 {
+    background: linear-gradient(135deg, #f7b733 0%, #d56d15 100%);
+}
+
+.profileSelectorCardAvatar.defaultCardBackground5 {
+    background: linear-gradient(135deg, #00b894 0%, #00695f 100%);
+}
+
+.profileSelectorCardAvatar.profileSelectorCardAvatarColor1 {
+    background: linear-gradient(135deg, #d51f28 0%, #8f1017 100%);
+}
+
+.profileSelectorCardAvatar.profileSelectorCardAvatarColor2 {
+    background: linear-gradient(135deg, #4cb7f5 0%, #176c9f 100%);
+}
+
+.profileSelectorCardAvatar.profileSelectorCardAvatarColor3 {
+    background: linear-gradient(135deg, #9d4edd 0%, #4f1d75 100%);
+}
+
+.profileSelectorCardAvatar.profileSelectorCardAvatarColor4 {
+    background: linear-gradient(135deg, #f7b733 0%, #d56d15 100%);
+}
+
+.profileSelectorCardAvatar.profileSelectorCardAvatarColor5 {
+    background: linear-gradient(135deg, #00b894 0%, #00695f 100%);
+}
+
+.profileSelectorCardInitial {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    color: rgb(255 255 255 / 92%);
+    font-size: clamp(4.5rem, 5.2vw, 6.3rem);
+    font-weight: 700;
+}
+
+.profileSelectorCardBadge,
+.profileSelectorCardLock,
+.profileSelectorCardActive {
+    position: absolute;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+}
+
+.profileSelectorCardBadge {
+    top: 10px;
+    right: 10px;
+    border-radius: 2px;
+    padding: 5px 7px;
+    background: rgb(255 255 255 / 94%);
+    color: #121418;
+    font-size: 0.64rem;
+    font-weight: 800;
+    line-height: 1;
+    letter-spacing: 0.08em;
+}
+
+.profileSelectorCardLock {
+    right: 0.85rem;
+    bottom: 0.85rem;
+    width: 2rem;
+    height: 2rem;
+    background: rgb(8 10 12 / 72%);
+    color: #fff;
+    font-size: 1rem;
+}
+
+.profileSelectorCardActive {
+    top: 0.85rem;
+    left: 0.85rem;
+    width: 0.75rem;
+    height: 0.75rem;
+    background: #5bd66a;
+    box-shadow: 0 0 18px rgb(91 214 106 / 70%);
+}
+
+.profileSelectorCardBody {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.65rem;
+}
+
+.profileSelectorCardTitle {
+    color: rgb(255 255 255 / 65%);
+    font-size: clamp(1.15rem, 1.35vw, 1.45rem);
+    font-weight: 500;
+    line-height: 1;
+    transition: color 180ms ease;
+}
+
+.profileSelectorCardMeta {
+    min-height: 1rem;
+    margin-top: -0.45rem;
+    color: rgb(255 255 255 / 32%);
+    font-size: clamp(0.75rem, 0.85vw, 0.9rem);
+    line-height: 1.3;
+    transition: color 180ms ease;
+}
+
+.profileSelectorCard:hover .profileSelectorCardTitle,
+.profileSelectorCard:focus-visible .profileSelectorCardTitle {
+    color: #fff;
+}
+
+.profileSelectorCard:hover .profileSelectorCardMeta,
+.profileSelectorCard:focus-visible .profileSelectorCardMeta {
+    color: rgb(255 255 255 / 55%);
+}
+
+.profileSelectorCardAdd {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 2px dashed var(--profile-selector-outline);
+    background: rgb(255 255 255 / 3%);
+    box-shadow: none;
+}
+
+.profileSelectorCard:hover .profileSelectorCardAdd,
+.profileSelectorCard:focus-visible .profileSelectorCardAdd {
+    background: rgb(255 255 255 / 6%);
+}
+
+.profileSelectorCardAddIcon {
+    color: rgb(255 255 255 / 42%);
+    font-size: clamp(4.8rem, 5.4vw, 6.5rem);
+    font-weight: 200;
+    transition: color 180ms ease;
+}
+
+.profileSelectorCard:hover .profileSelectorCardAddIcon,
+.profileSelectorCard:focus-visible .profileSelectorCardAddIcon {
+    color: #fff;
+}
+
+.profileSelectorFooterActions {
+    display: flex;
+    justify-content: center;
+    gap: 0.75rem;
+    margin-top: clamp(1.25rem, 2.5vh, 2rem);
+    flex-wrap: wrap;
+}
+
+.profileSelectorFooterActions .emby-button,
+.profileSelectorFooterActions button[is="emby-button"] {
+    display: inline-flex;
+    justify-content: center;
+    width: auto !important;
+    min-width: 0;
+    border: 1px solid rgb(255 255 255 / 35%);
+    border-radius: 4px;
+    padding: 0.85rem 2rem;
+    background: transparent !important;
+    color: rgb(255 255 255 / 74%);
+    font-size: 0.82rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    line-height: 1;
+    text-transform: uppercase;
+}
+
+.profileSelectorFooterActions .btnManageProfiles,
+.profileSelectorFooterActions .btnSaveProfiles {
+    min-width: 21.5rem;
+}
+
+.profileSelectorFooterActions .emby-button:hover,
+.profileSelectorFooterActions button[is="emby-button"]:hover,
+.profileSelectorFooterActions .emby-button:focus-visible,
+.profileSelectorFooterActions button[is="emby-button"]:focus-visible {
+    border-color: #fff;
+    color: #fff;
+}
+
+.profileSelectorFooterActions .btnLogout {
+    border-color: transparent;
+    color: rgb(255 255 255 / 55%);
+    letter-spacing: 0.06em;
+    text-transform: none;
+}
+
+.profileSelectorFooterActions .btnLogout:hover,
+.profileSelectorFooterActions .btnLogout:focus-visible {
+    border-color: rgb(255 255 255 / 18%);
+}
+
+.profileSelectorManagePanel {
+    width: min(100%, 1120px);
+    max-width: 1120px;
+    margin: 0 auto;
+    padding-top: 0;
+}
+
+.profileSelectorManagePage .profileSelectorShell {
+    align-items: stretch;
+    justify-content: flex-start;
+    overflow: auto;
+    height: auto;
+    min-height: 100dvh;
+    padding-top: calc(var(--profile-selector-header-height) + clamp(16px, 2.5vh, 28px) + env(safe-area-inset-top));
+    padding-bottom: max(18px, env(safe-area-inset-bottom));
+}
+
+.profileSelectorManageTitle {
+    margin: 0;
+    color: #fff;
+    font-size: clamp(2.4rem, 4vw, 3.6rem);
+    font-weight: 700;
+    letter-spacing: -0.03em;
+}
+
+.profileSelectorManageSubtitle {
+    max-width: 680px;
+    margin: 0.65rem 0 1.5rem;
+    color: var(--profile-selector-text-muted);
+    font-size: 1rem;
+    line-height: 1.5;
+}
+
+.profileSelectorManageToggles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem 2rem;
+    margin-bottom: 1.25rem;
+}
+
+.profileSelectorManageList {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+}
+
+.profileSelectorManageRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1.5rem;
+    border: 1px solid var(--profile-selector-panel-border);
+    border-radius: 26px;
+    padding: 0.85rem 1rem;
+    background: var(--profile-selector-panel);
+}
+
+.profileSelectorManageIdentity {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    min-width: 0;
+}
+
+.profileSelectorManageAvatarFrame {
+    position: relative;
+    overflow: hidden;
+    flex: 0 0 84px;
+    border-radius: 18px;
+    aspect-ratio: 1 / 1;
+}
+
+.profileSelectorManageCopy {
+    min-width: 0;
+}
+
+.profileSelectorManageName {
+    color: #fff;
+    font-size: 1.15rem;
+    font-weight: 600;
+}
+
+.profileSelectorManageMeta {
+    margin-top: 0.25rem;
+    color: var(--profile-selector-text-muted);
+    font-size: 0.92rem;
+}
+
+.profileSelectorManageActions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 1rem;
+    flex-wrap: wrap;
+}
+
+.profileSelectorManageActions .checkboxContainer {
+    margin: 0;
+}
+
+.profileSelectorManageActions .btnToggleProfilePin {
+    min-width: 190px;
+    border: 1px solid rgb(255 255 255 / 24%);
+    border-radius: 4px;
+    background: rgb(255 255 255 / 4%) !important;
+    color: rgb(255 255 255 / 78%);
+    font-weight: 600;
+}
+
+.profileSelectorManageActions .btnToggleProfilePin:hover,
+.profileSelectorManageActions .btnToggleProfilePin:focus-visible {
+    border-color: rgb(255 255 255 / 48%);
+    background: rgb(255 255 255 / 8%) !important;
+    color: #fff;
+}
+
+.profileSelectorManageEmpty {
+    margin: 0;
+    color: var(--profile-selector-text-muted);
+}
+
+@media (max-width: 720px) {
+    .profileSelectorPage {
+        --profile-selector-card-size: min(40vw, 168px);
+    }
+
+    .profileSelectorShell {
+        align-items: stretch;
+        justify-content: flex-start;
+        overflow: auto;
+        height: auto;
+        min-height: 100dvh;
+        padding: calc(var(--profile-selector-header-height) + 24px + env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) max(32px, env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left));
+    }
+
+    .profileSelectorTitle {
+        font-size: clamp(2.55rem, 11vw, 3.5rem);
+    }
+
+    .profileSelectorSubtitle {
+        margin-bottom: 2.2rem;
+    }
+
+    .profileSelectorContent {
+        transform: none;
+        padding-top: 1rem;
+    }
+
+    .profileSelectorCards {
+        gap: 1.25rem 1rem;
+    }
+
+    .profileSelectorCardTitle {
+        font-size: 1.05rem;
+    }
+
+    .profileSelectorFooterActions .emby-button,
+    .profileSelectorFooterActions button[is="emby-button"] {
+        width: 100%;
+        max-width: 320px;
+    }
+
+    .profileSelectorManagePanel {
+        padding-top: 0.5rem;
+    }
+
+    .profileSelectorManageRow {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .profileSelectorManageActions {
+        width: 100%;
+        justify-content: flex-start;
+    }
+}

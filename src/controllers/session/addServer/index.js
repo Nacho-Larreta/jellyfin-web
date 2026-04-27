@@ -1,6 +1,7 @@
 import loading from 'components/loading/loading';
 import globalize from 'lib/globalize';
 import { ConnectionState, ServerConnections } from 'lib/jellyfin-apiclient';
+import { resolveProfileSelectorRoute } from 'lib/profileSelector/navigation';
 import appSettings from 'scripts/settings/appSettings';
 import Dashboard from 'utils/dashboard';
 
@@ -11,8 +12,15 @@ function handleConnectionResult(page, result) {
     switch (result.State) {
         case ConnectionState.SignedIn: {
             const apiClient = result.ApiClient;
-            Dashboard.onServerChanged(apiClient.getCurrentUserId(), apiClient.accessToken(), apiClient);
-            Dashboard.navigate('home');
+            resolveProfileSelectorRoute(apiClient, '/home').then(targetUrl => {
+                const activeApiClient = ServerConnections.currentApiClient() || apiClient;
+                Dashboard.onServerChanged(activeApiClient.getCurrentUserId(), activeApiClient.accessToken(), activeApiClient);
+                Dashboard.navigate(targetUrl);
+            }).catch(err => {
+                console.warn('[addServer] unable to resolve profile selector route', err);
+                Dashboard.onServerChanged(apiClient.getCurrentUserId(), apiClient.accessToken(), apiClient);
+                Dashboard.navigate('home');
+            });
             break;
         }
         case ConnectionState.ServerSignIn:
@@ -73,4 +81,3 @@ export default function(view) {
         });
     }
 }
-

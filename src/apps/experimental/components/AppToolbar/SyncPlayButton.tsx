@@ -1,6 +1,5 @@
 import { SyncPlayUserAccessType } from '@jellyfin/sdk/lib/generated-client/models/sync-play-user-access-type';
 import Badge from '@mui/material/Badge';
-import Groups from '@mui/icons-material/Groups';
 import IconButton from '@mui/material/IconButton';
 import Tooltip from '@mui/material/Tooltip';
 import React, { useCallback, useState } from 'react';
@@ -9,14 +8,17 @@ import { QUERY_KEY, useSyncPlayGroups } from 'apps/experimental/features/syncPla
 import { useSyncPlay } from 'apps/experimental/features/syncPlay/hooks/useSyncPlay';
 import { pluginManager } from 'components/pluginManager';
 import { useApi } from 'hooks/useApi';
+import { useWebConfig } from 'hooks/useWebConfig';
 import globalize from 'lib/globalize';
 import { PluginType } from 'types/plugin';
 import { queryClient } from 'utils/query/queryClient';
 
+import { JellyflixUsersIcon } from './JellyflixIcons';
 import AppSyncPlayMenu, { ID } from './menus/SyncPlayMenu';
 
 const SyncPlayButton = () => {
     const { user } = useApi();
+    const webConfig = useWebConfig();
     const { isActive } = useSyncPlay();
     const { data: groups } = useSyncPlayGroups();
     const isAvailable = Boolean(groups && groups.length > 0);
@@ -35,9 +37,8 @@ const SyncPlayButton = () => {
     }, [ setSyncPlayMenuAnchorEl ]);
 
     if (
-        // SyncPlay not enabled for user
-        (user?.Policy && user.Policy.SyncPlayAccess === SyncPlayUserAccessType.None)
-        // SyncPlay plugin is not loaded
+        !webConfig.jellyflix?.syncPlayEnabled
+        || (user?.Policy && user.Policy.SyncPlayAccess === SyncPlayUserAccessType.None)
         || pluginManager.ofType(PluginType.SyncPlay).length === 0
     ) {
         return null;
@@ -60,7 +61,7 @@ const SyncPlayButton = () => {
                         invisible={!isActive && !isAvailable}
                         variant='dot'
                     >
-                        <Groups />
+                        <JellyflixUsersIcon />
                     </Badge>
                 </IconButton>
             </Tooltip>

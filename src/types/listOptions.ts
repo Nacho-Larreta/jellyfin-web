@@ -16,7 +16,7 @@ export interface ListOptions extends TextLineOpts {
     enableSideMediaInfo?: boolean;
     playlistId?: string | null;
     collectionId?: string | null;
-    context?: CollectionType;
+    context?: CollectionType | string;
     parentId?: string | null;
     border?: boolean;
     highlight?: boolean;

@@ -87,6 +87,18 @@ export const LEGACY_USER_ROUTES: LegacyRoute[] = [
             isThemeMediaSupported: true
         }
     }, {
+        path: 'profileselector/manage',
+        pageProps: {
+            controller: 'session/profileSelector/manage/index',
+            view: 'session/profileSelector/manage/index.html'
+        }
+    }, {
+        path: 'profileselector',
+        pageProps: {
+            controller: 'session/profileSelector/index',
+            view: 'session/profileSelector/index.html'
+        }
+    }, {
         path: 'home',
         pageProps: {
             controller: 'home',

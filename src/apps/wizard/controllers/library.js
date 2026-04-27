@@ -5,6 +5,7 @@ import confirm from 'components/confirm/confirm';
 import loading from 'components/loading/loading';
 import globalize from 'lib/globalize';
 import { ServerConnections } from 'lib/jellyfin-apiclient';
+import { JellyflixCollectionType } from 'constants/jellyflixCollectionTypes';
 import dom from 'utils/dom';
 import taskButton from 'scripts/taskbutton';
 import Dashboard, { pageClassOn, pageIdOn } from 'utils/dashboard';
@@ -256,6 +257,12 @@ function getCollectionTypeOptions() {
         name: globalize.translate('MusicVideos'),
         value: 'musicvideos'
     }, {
+        name: globalize.translate('Courses'),
+        value: JellyflixCollectionType.Courses
+    }, {
+        name: globalize.translate('AdultVideos'),
+        value: JellyflixCollectionType.AdultVideos
+    }, {
         name: globalize.translate('MixedMoviesShows'),
         value: 'mixed',
         message: globalize.translate('MessageUnsetContentHelp')
@@ -394,4 +401,3 @@ pageIdOn('pagebeforehide', 'mediaLibraryPage', function () {
         button: page.querySelector('.btnRefresh')
     });
 });
-

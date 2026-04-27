@@ -15,6 +15,7 @@ import { setBackdropTransparency } from '../components/backdrop/backdrop';
 import DirectoryBrowser from '../components/directorybrowser/directorybrowser';
 import dialogHelper from '../components/dialogHelper/dialogHelper';
 import itemIdentifier from '../components/itemidentifier/itemidentifier';
+import { clearAllUnlockedProfileUserIds } from 'lib/profileSelector/session';
 import { getLocationSearch } from './url.ts';
 import { queryClient } from './query/queryClient';
 
@@ -102,6 +103,8 @@ export function onServerChanged(_userId, _accessToken, apiClient) {
 }
 
 export function logout() {
+    clearAllUnlockedProfileUserIds();
+
     ServerConnections.logout().then(function () {
         // Clear the query cache
         queryClient.clear();

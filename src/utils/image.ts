@@ -2,6 +2,7 @@ import { CollectionType } from '@jellyfin/sdk/lib/generated-client/models/collec
 import { BaseItemKind } from '@jellyfin/sdk/lib/generated-client/models/base-item-kind';
 import type { DeviceInfo } from '@jellyfin/sdk/lib/generated-client/models/device-info';
 import type { SessionInfo } from '@jellyfin/sdk/lib/generated-client/models/session-info';
+import { JellyflixCollectionType } from 'constants/jellyflixCollectionTypes';
 
 const BASE_DEVICE_IMAGE_URL = 'assets/img/devices/';
 
@@ -118,6 +119,10 @@ export function getLibraryIcon(library: CollectionType | string | null | undefin
             return 'video_library';
         case CollectionType.Playlists:
             return 'queue';
+        case JellyflixCollectionType.Courses:
+            return 'school';
+        case JellyflixCollectionType.AdultVideos:
+            return 'lock';
         case 'channels':
             return 'videocam';
         case undefined:

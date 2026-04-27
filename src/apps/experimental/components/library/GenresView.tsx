@@ -6,7 +6,7 @@ import type { ParentId } from 'types/library';
 
 interface GenresViewProps {
     parentId: ParentId;
-    collectionType: CollectionType | undefined;
+    collectionType: CollectionType | string | undefined;
     itemType: BaseItemKind[];
 }
 

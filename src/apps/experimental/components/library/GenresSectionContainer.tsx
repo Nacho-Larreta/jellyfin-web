@@ -17,7 +17,7 @@ import type { ItemDto } from 'types/base/models/item-dto';
 
 interface GenresSectionContainerProps {
     parentId: ParentId;
-    collectionType: CollectionType | undefined;
+    collectionType: CollectionType | string | undefined;
     itemType: BaseItemKind[];
     genre: ItemDto;
 }

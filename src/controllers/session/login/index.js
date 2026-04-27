@@ -18,6 +18,7 @@ import Dashboard from '../../../utils/dashboard';
 import toast from '../../../components/toast/toast';
 import dialogHelper from '../../../components/dialogHelper/dialogHelper';
 import baseAlert from '../../../components/alert';
+import { resolveProfileSelectorRoute } from '../../../lib/profileSelector/navigation';
 import { getDefaultBackgroundClass } from '../../../components/cardbuilder/utils/builder';
 
 import './login.scss';
@@ -113,8 +114,15 @@ function authenticateQuickConnect(apiClient, targetUrl) {
 }
 
 function onLoginSuccessful(id, accessToken, apiClient, url) {
-    Dashboard.onServerChanged(id, accessToken, apiClient);
-    Dashboard.navigate(url || 'home');
+    resolveProfileSelectorRoute(apiClient, url || '/home').then(targetUrl => {
+        const activeApiClient = ServerConnections.currentApiClient() || apiClient;
+        Dashboard.onServerChanged(activeApiClient.getCurrentUserId(), activeApiClient.accessToken(), activeApiClient);
+        Dashboard.navigate(targetUrl);
+    }).catch(err => {
+        console.warn('[LoginPage] unable to resolve profile selector route', err);
+        Dashboard.onServerChanged(id, accessToken, apiClient);
+        Dashboard.navigate(url || 'home');
+    });
 }
 
 function showManualForm(context, showCancel, focusPassword) {
@@ -316,4 +324,3 @@ export default function (view, params) {
         libraryMenu.setTransparentMenu(false);
     });
 }
-

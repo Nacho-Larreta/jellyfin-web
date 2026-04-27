@@ -7,6 +7,7 @@ import loading from '../loading/loading';
 import alert from '../alert';
 
 import { LayoutMode } from 'constants/layoutMode';
+import { JellyflixCollectionType } from 'constants/jellyflixCollectionTypes';
 import { getItemQuery } from 'hooks/useItem';
 import { ServerConnections } from 'lib/jellyfin-apiclient';
 import { toApi } from 'utils/jellyfin-apiclient/compat';
@@ -450,6 +451,14 @@ class AppRouter {
                     url += '&tab=1';
                 }
                 return url;
+            }
+
+            if (layoutMode === LayoutMode.Experimental && item.CollectionType == JellyflixCollectionType.Courses) {
+                return `#/courses?topParentId=${item.Id}&collectionType=${item.CollectionType}`;
+            }
+
+            if (layoutMode === LayoutMode.Experimental && item.CollectionType == JellyflixCollectionType.AdultVideos) {
+                return `#/adultvideos?topParentId=${item.Id}&collectionType=${item.CollectionType}`;
             }
         }
 
