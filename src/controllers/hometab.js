@@ -1,6 +1,7 @@
 import * as userSettings from '../scripts/settings/userSettings';
 import focusManager from '../components/focusManager';
 import homeSections from '../components/homesections/homesections';
+import { destroyTvHomeHero, loadTvHomeHero } from '../components/homesections/sections/tvHomeHero';
 import { ServerConnections } from 'lib/jellyfin-apiclient';
 
 import '../elements/emby-itemscontainer/emby-itemscontainer';
@@ -10,26 +11,35 @@ class HomeTab {
         this.view = view;
         this.params = params;
         this.apiClient = ServerConnections.currentApiClient();
+        this.heroElement = view.querySelector('.tvHomeHero');
         this.sectionsContainer = view.querySelector('.sections');
         view.querySelector('.sections').addEventListener('settingschange', onHomeScreenSettingsChanged.bind(this));
     }
     onResume(options) {
+        const heroPromise = loadTvHomeHero(this.heroElement, this.apiClient);
+
         if (this.sectionsRendered) {
             const sectionsContainer = this.sectionsContainer;
 
             if (sectionsContainer) {
-                return homeSections.resume(sectionsContainer, options);
+                return Promise.all([
+                    heroPromise,
+                    homeSections.resume(sectionsContainer, options)
+                ]);
             }
 
-            return Promise.resolve();
+            return heroPromise;
         }
 
         const view = this.view;
         const apiClient = this.apiClient;
         this.destroyHomeSections();
         this.sectionsRendered = true;
-        return apiClient.getCurrentUser()
-            .then(user => homeSections.loadSections(view.querySelector('.sections'), apiClient, user, userSettings))
+        return Promise.all([
+            heroPromise,
+            apiClient.getCurrentUser()
+                .then(user => homeSections.loadSections(view.querySelector('.sections'), apiClient, user, userSettings))
+        ])
             .then(() => {
                 if (options.autoFocus) {
                     focusManager.autoFocus(view);
@@ -50,6 +60,10 @@ class HomeTab {
         this.params = null;
         this.apiClient = null;
         this.destroyHomeSections();
+        if (this.heroElement) {
+            destroyTvHomeHero(this.heroElement);
+        }
+        this.heroElement = null;
         this.sectionsContainer = null;
     }
     destroyHomeSections() {

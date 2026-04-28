@@ -20,3 +20,223 @@
     text-overflow: ellipsis;
     overflow: hidden;
 }
+
+.homePage .tvHomeHero {
+    margin-top: -1.5em;
+}
+
+.tvHomeHero__shell {
+    min-height: clamp(26rem, 56vh, 42rem);
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    padding: clamp(5rem, 8vw, 7.5rem) clamp(1.25rem, 5vw, 5rem) clamp(3rem, 7vw, 5.5rem);
+    isolation: isolate;
+    background:
+        radial-gradient(circle at 76% 28%, rgba(0, 164, 220, 0.24), transparent 32%),
+        linear-gradient(135deg, rgba(170, 92, 195, 0.22), rgba(0, 0, 0, 0) 38%),
+        #090a0d;
+}
+
+.tvHomeHero__backdrop {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scale(1.02);
+    opacity: 0.74;
+    z-index: 0;
+}
+
+.tvHomeHero__shade {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+}
+
+.tvHomeHero__shade--side {
+    background: linear-gradient(90deg, rgba(0, 0, 0, 0.94) 0%, rgba(0, 0, 0, 0.74) 34%, rgba(0, 0, 0, 0.18) 68%, rgba(0, 0, 0, 0.68) 100%);
+    z-index: 1;
+}
+
+.tvHomeHero__shade--bottom {
+    background:
+        linear-gradient(0deg, var(--jf-palette-background-default, #101010) 0%, rgba(16, 16, 16, 0.86) 12%, rgba(16, 16, 16, 0) 42%),
+        linear-gradient(180deg, rgba(0, 0, 0, 0.72) 0%, rgba(0, 0, 0, 0) 24%);
+    z-index: 2;
+}
+
+.tvHomeHero__content {
+    width: min(48rem, 62vw);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.9rem;
+    color: #fff;
+    text-shadow: 0 2px 18px rgba(0, 0, 0, 0.8);
+    z-index: 3;
+}
+
+.tvHomeHero__eyebrow {
+    color: rgba(255, 255, 255, 0.72);
+    font-size: 0.78rem;
+    font-weight: 800;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+}
+
+.tvHomeHero__title {
+    max-width: 12em;
+    margin: 0;
+    color: #fff;
+    font-size: clamp(2.5rem, 6vw, 5.5rem);
+    font-weight: 900;
+    line-height: 0.95;
+    letter-spacing: -0.05em;
+}
+
+.tvHomeHero__episode,
+.tvHomeHero__metadata {
+    color: rgba(255, 255, 255, 0.82);
+    font-size: clamp(0.95rem, 1.3vw, 1.15rem);
+    font-weight: 650;
+}
+
+.tvHomeHero__metadata {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.55rem;
+}
+
+.tvHomeHero__metadata span:not(:last-child)::after {
+    content: "\00b7";
+    margin-left: 0.55rem;
+    color: rgba(255, 255, 255, 0.45);
+}
+
+.tvHomeHero__overview {
+    max-width: 44rem;
+    margin: 0;
+    display: -webkit-box;
+    overflow: hidden;
+    color: rgba(255, 255, 255, 0.78);
+    font-size: clamp(1rem, 1.35vw, 1.2rem);
+    line-height: 1.48;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+}
+
+.tvHomeHero__progressGroup {
+    width: min(28rem, 100%);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.85rem;
+    margin-top: 0.25rem;
+}
+
+.tvHomeHero__progress {
+    width: 100%;
+    height: 0.32rem;
+    overflow: hidden;
+    border: 0;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.tvHomeHero__progress::-webkit-progress-bar {
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.2);
+}
+
+.tvHomeHero__progress::-webkit-progress-value {
+    border-radius: 999px;
+    background: linear-gradient(90deg, #00a4dc, #aa5cc3);
+}
+
+.tvHomeHero__progress::-moz-progress-bar {
+    border-radius: 999px;
+    background: linear-gradient(90deg, #00a4dc, #aa5cc3);
+}
+
+.tvHomeHero__progressText {
+    color: rgba(255, 255, 255, 0.72);
+    font-size: 0.85rem;
+    font-weight: 700;
+}
+
+.tvHomeHero__button {
+    min-width: 9.5rem;
+    min-height: 3rem;
+    margin-top: 0.5rem !important;
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    border-radius: 999px !important;
+    font-size: 1.05rem !important;
+    font-weight: 800 !important;
+    text-transform: none !important;
+    box-shadow: 0 12px 32px rgba(0, 164, 220, 0.28);
+}
+
+.tvHomeHero__button .material-icons {
+    font-size: 1.65rem;
+}
+
+.tvHomeHero__posterFrame {
+    width: clamp(10rem, 18vw, 17rem);
+    margin-left: auto;
+    margin-right: clamp(0rem, 3vw, 3rem);
+    display: flex;
+    align-self: center;
+    border-radius: 1.1rem;
+    background: rgba(255, 255, 255, 0.08);
+    box-shadow:
+        0 28px 80px rgba(0, 0, 0, 0.62),
+        0 0 0 1px rgba(255, 255, 255, 0.14);
+    z-index: 3;
+}
+
+.tvHomeHero__poster {
+    width: 100%;
+    border-radius: inherit;
+    aspect-ratio: 2 / 3;
+    object-fit: cover;
+}
+
+.homePage .tvHomeHero:not(.hide) + .sections {
+    margin-top: clamp(-2rem, -3vw, -1rem);
+    position: relative;
+    z-index: 1;
+}
+
+@media all and (max-width: 60em) {
+    .homePage .tvHomeHero {
+        margin-top: 0;
+    }
+
+    .tvHomeHero__shell {
+        min-height: 32rem;
+        align-items: flex-end;
+        padding: 6rem 1.25rem 2.5rem;
+    }
+
+    .tvHomeHero__content {
+        width: 100%;
+    }
+
+    .tvHomeHero__title {
+        max-width: 100%;
+    }
+
+    .tvHomeHero__posterFrame {
+        display: none;
+    }
+
+    .tvHomeHero__overview {
+        -webkit-line-clamp: 2;
+    }
+}

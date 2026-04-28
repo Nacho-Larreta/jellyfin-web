@@ -38,9 +38,9 @@ const Home = () => {
     const documentRef = useRef<Document>(document);
     const element = useRef<HTMLDivElement>(null);
 
-    const setTitle = async () => {
+    const setTitle = useCallback(async () => {
         (await libraryMenu).setTitle(null);
-    };
+    }, [ libraryMenu ]);
 
     const getTabs = () => {
         return [{
@@ -127,7 +127,7 @@ const Home = () => {
             currentTabController.onResume({});
         }
         (documentRef.current.querySelector('.skinHeader') as HTMLDivElement).classList.add('noHomeButtonHeader');
-    }, [ initialTabIndex, mainTabsManager ]);
+    }, [ initialTabIndex, mainTabsManager, setTitle ]);
 
     const onPause = useCallback(() => {
         const currentTabController = tabController.current;
@@ -170,6 +170,7 @@ const Home = () => {
                 backDropType='movie,series,book'
             >
                 <div className='tabContent pageTabContent' id='homeTab' data-index='0'>
+                    <div className='tvHomeHero hide'></div>
                     <div className='sections'></div>
                 </div>
                 <div className='tabContent pageTabContent' id='favoritesTab' data-index='1'>
