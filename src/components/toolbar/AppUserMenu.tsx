@@ -3,6 +3,7 @@ import ChevronRight from '@mui/icons-material/ChevronRight';
 import Close from '@mui/icons-material/Close';
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import Logout from '@mui/icons-material/Logout';
+import PhonelinkLock from '@mui/icons-material/PhonelinkLock';
 import Settings from '@mui/icons-material/Settings';
 import Storage from '@mui/icons-material/Storage';
 import Avatar from '@mui/material/Avatar';
@@ -23,6 +24,7 @@ import loading from 'components/loading/loading';
 import prompt from 'components/prompt/prompt';
 import { AppFeature } from 'constants/appFeature';
 import { useApi } from 'hooks/useApi';
+import { useQuickConnectEnabled } from 'hooks/useQuickConnect';
 import globalize from 'lib/globalize';
 import { ServerConnections } from 'lib/jellyfin-apiclient';
 import { activateProfileSession, reloadIntoProfileTarget } from 'lib/profileSelector/activation';
@@ -363,6 +365,7 @@ const AppUserMenu: FC<AppUserMenuProps> = ({
     profileSelector
 }) => {
     const { __legacyApiClient__, api, user } = useApi();
+    const { data: isQuickConnectEnabled } = useQuickConnectEnabled();
     const currentServer = user?.ServerId ? ServerConnections.getServerInfo(user.ServerId) : null;
     const serverName = currentServer?.Name || user?.ServerName || __legacyApiClient__?.serverAddress?.();
     const visibleProfiles = useMemo<ProfileSelectorMember[]>(
@@ -622,6 +625,23 @@ const AppUserMenu: FC<AppUserMenuProps> = ({
                     </ListItemIcon>
                     <ListItemText primary={globalize.translate('Settings')} />
                 </MenuItem>
+
+                {isQuickConnectEnabled && (
+                    <MenuItem
+                        component={Link}
+                        to={`/quickconnect?userId=${user?.Id}`}
+                        onClick={onMenuClose}
+                        sx={MENU_ITEM_SX}
+                    >
+                        <ListItemIcon>
+                            <PhonelinkLock fontSize='small' />
+                        </ListItemIcon>
+                        <ListItemText
+                            primary={globalize.translate('QuickConnect')}
+                            secondary={globalize.translate('ProfileSelectorMenuQuickConnectDescription')}
+                        />
+                    </MenuItem>
+                )}
             </Box>
 
             {user?.Policy?.IsAdministrator && (
@@ -667,6 +687,23 @@ const AppUserMenu: FC<AppUserMenuProps> = ({
                             </ListItemIcon>
                             <ListItemText primary={globalize.translate('TabDashboard')} />
                         </MenuItem>
+
+                        {!isQuickConnectEnabled && (
+                            <MenuItem
+                                component={Link}
+                                to='/dashboard/settings'
+                                onClick={onMenuClose}
+                                sx={MENU_ITEM_SX}
+                            >
+                                <ListItemIcon>
+                                    <PhonelinkLock fontSize='small' />
+                                </ListItemIcon>
+                                <ListItemText
+                                    primary={globalize.translate('QuickConnect')}
+                                    secondary={globalize.translate('EnableQuickConnect')}
+                                />
+                            </MenuItem>
+                        )}
 
                         <ServerStatusRow
                             onSelectServerClick={onSelectServerClick}

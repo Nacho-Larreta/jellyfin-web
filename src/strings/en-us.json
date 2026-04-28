@@ -1937,6 +1937,7 @@
     "ProfileSelectorMenuUserRole": "User",
     "ProfileSelectorMenuKidsRole": "Kids",
     "ProfileSelectorMenuServerOnline": "Server online",
+    "ProfileSelectorMenuQuickConnectDescription": "Connect another device",
     "ProfileSelectorNoProfilesAvailable": "No profiles are available to include yet.",
     "ProfileSelectorSelectAtLeastOne": "Select at least one profile before saving.",
     "ToolbarCastNoDevicesTitle": "No devices available",

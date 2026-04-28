@@ -23,6 +23,24 @@ html.profileSelectorViewportLocked .mainAnimatedPages {
     overflow: hidden !important;
 }
 
+html.profileSelectorViewportLocked .skinHeader .headerTabs,
+html.profileSelectorViewportLocked .skinHeader .headerRight,
+html.profileSelectorViewportLocked .skinHeader .headerBackButton,
+html.profileSelectorViewportLocked .skinHeader .headerHomeButton,
+html.profileSelectorViewportLocked .skinHeader .mainDrawerButton,
+html.profileSelectorViewportLocked .skinHeader .pageTitle,
+html.profileSelectorViewportLocked .skinHeader .libraryMenuOptions {
+    display: none !important;
+}
+
+html.profileSelectorViewportLocked .skinHeader .headerLeft {
+    width: auto;
+}
+
+html.profileSelectorViewportLocked .skinHeader .jellyflixHeaderBrand {
+    pointer-events: none;
+}
+
 .profileSelectorShell {
     display: flex;
     align-items: center;
