@@ -1,12 +1,9 @@
 import React, { type ChangeEvent, type FC, useCallback, useRef } from 'react';
 import AlphaPicker from 'components/alphaPicker/AlphaPickerComponent';
-import Input from 'elements/emby-input/Input';
 import globalize from 'lib/globalize';
 import layoutManager from 'components/layoutManager';
 import browser from 'scripts/browser';
 import 'material-design-icons-iconfont';
-import 'styles/flexstyles.scss';
-import './searchfields.scss';
 
 interface SearchFieldsProps {
     query: string,
@@ -34,21 +31,24 @@ const SearchFields: FC<SearchFieldsProps> = ({
         onSearch(e.target.value);
     }, [ onSearch ]);
 
+    const onClear = useCallback(() => {
+        onSearch('');
+        inputRef.current?.focus();
+    }, [ onSearch ]);
+
     return (
-        <div className='padded-left padded-right searchFields'>
-            <div className='searchFieldsInner flex align-items-center justify-content-center'>
-                <span className='searchfields-icon material-icons search' aria-hidden='true' />
-                <div
-                    className='inputContainer flex-grow'
-                    style={{ marginBottom: 0 }}
-                >
-                    <Input
+        <div className='search-screen__hero padded-left padded-right'>
+            <div className='search-hero'>
+                <label className='search-input' htmlFor='searchTextInput'>
+                    <span className='search-input__icon material-icons search' aria-hidden='true' />
+                    <input
                         ref={inputRef}
                         id='searchTextInput'
-                        className='searchfields-txtSearch'
+                        className='search-input__control'
                         type='text'
                         data-keyboard='true'
                         placeholder={globalize.translate('Search')}
+                        aria-label={globalize.translate('Search')}
                         autoComplete='off'
                         maxLength={40}
                         // eslint-disable-next-line jsx-a11y/no-autofocus
@@ -56,7 +56,17 @@ const SearchFields: FC<SearchFieldsProps> = ({
                         value={query}
                         onChange={onChange}
                     />
-                </div>
+                </label>
+                {query && (
+                    <button
+                        type='button'
+                        className='search-input__clear'
+                        aria-label='Limpiar búsqueda'
+                        onClick={onClear}
+                    >
+                        <span aria-hidden='true'>&times;</span>
+                    </button>
+                )}
             </div>
             {layoutManager.tv && !browser.tv
                 && <AlphaPicker onAlphaPicked={onAlphaPicked} />

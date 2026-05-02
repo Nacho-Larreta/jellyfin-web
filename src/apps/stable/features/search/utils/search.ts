@@ -1,11 +1,19 @@
 import { BaseItemKind } from '@jellyfin/sdk/lib/generated-client/models/base-item-kind';
+import type { BaseItemDto } from '@jellyfin/sdk/lib/generated-client/models/base-item-dto';
 import { CollectionType } from '@jellyfin/sdk/lib/generated-client/models/collection-type';
+import { ImageType } from '@jellyfin/sdk/lib/generated-client/models/image-type';
 import { CardShape } from 'components/cardbuilder/utils/shape';
 import { Section } from '../types';
 import { CardOptions } from 'types/cardOptions';
-import type { BaseItemDto } from '@jellyfin/sdk/lib/generated-client/models/base-item-dto';
 import { LIVETV_CARD_OPTIONS } from '../constants/liveTvCardOptions';
 import { SEARCH_SECTIONS_SORT_ORDER } from '../constants/sectionSortOrder';
+import type { ApiClient } from 'jellyfin-apiclient';
+
+interface SearchImageOptions {
+    fillWidth?: number;
+    fillHeight?: number;
+    quality?: number;
+}
 
 export const isMovies = (collectionType: string) =>
     collectionType === CollectionType.Movies;
@@ -138,4 +146,96 @@ export function getItemTypesFromCollectionType(collectionType: CollectionType | 
                 BaseItemKind.BoxSet
             ];
     }
+}
+
+export function getSearchItemImageUrl(
+    apiClient: ApiClient | undefined,
+    item: BaseItemDto,
+    options: SearchImageOptions = {}
+) {
+    if (!apiClient) return undefined;
+
+    if (item.Id && item.ImageTags?.Primary) {
+        return apiClient.getScaledImageUrl(item.Id, {
+            type: ImageType.Primary,
+            tag: item.ImageTags.Primary,
+            quality: 96,
+            ...options
+        });
+    }
+
+    if (item.SeriesId && item.SeriesPrimaryImageTag) {
+        return apiClient.getScaledImageUrl(item.SeriesId, {
+            type: ImageType.Primary,
+            tag: item.SeriesPrimaryImageTag,
+            quality: 96,
+            ...options
+        });
+    }
+
+    if (item.ParentPrimaryImageItemId && item.ParentPrimaryImageTag) {
+        return apiClient.getScaledImageUrl(item.ParentPrimaryImageItemId, {
+            type: ImageType.Primary,
+            tag: item.ParentPrimaryImageTag,
+            quality: 96,
+            ...options
+        });
+    }
+
+    if (item.AlbumId && item.AlbumPrimaryImageTag) {
+        return apiClient.getScaledImageUrl(item.AlbumId, {
+            type: ImageType.Primary,
+            tag: item.AlbumPrimaryImageTag,
+            quality: 96,
+            ...options
+        });
+    }
+
+    return undefined;
+}
+
+export function getSearchItemInitials(item: BaseItemDto) {
+    return (item.Name || '?')
+        .split(' ')
+        .filter(Boolean)
+        .slice(0, 2)
+        .map(part => part[0]?.toUpperCase())
+        .join('');
+}
+
+export function getSearchItemTypeLabel(item: BaseItemDto) {
+    switch (item.Type) {
+        case BaseItemKind.Movie:
+            return 'Película';
+        case BaseItemKind.Series:
+            return 'Series';
+        case BaseItemKind.Episode:
+            return 'Episodio';
+        case BaseItemKind.Person:
+            return 'Persona';
+        case BaseItemKind.MusicAlbum:
+            return 'Álbum';
+        case BaseItemKind.Audio:
+            return 'Canción';
+        case BaseItemKind.MusicArtist:
+            return 'Artista';
+        case BaseItemKind.BoxSet:
+            return 'Colección';
+        case BaseItemKind.TvChannel:
+            return 'Canal';
+        default:
+            return item.Type || 'Ítem';
+    }
+}
+
+export function getSearchItemSubtitle(item: BaseItemDto) {
+    const parts = [
+        getSearchItemTypeLabel(item),
+        item.ProductionYear,
+        item.SeriesName,
+        item.Album,
+        item.Artists?.join(', ')
+    ].filter(Boolean);
+
+    return parts.join(' · ');
 }

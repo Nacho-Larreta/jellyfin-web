@@ -9,6 +9,7 @@ import SearchSuggestions from 'apps/stable/features/search/components/SearchSugg
 import Page from 'components/Page';
 import useSearchParam from 'hooks/useSearchParam';
 import globalize from 'lib/globalize';
+import 'apps/stable/features/search/components/searchfields.scss';
 
 const COLLECTION_TYPE_PARAM = 'collectionType';
 const PARENT_ID_PARAM = 'parentId';
@@ -31,6 +32,7 @@ const Search: FC = () => {
             {!debouncedQuery ? (
                 <SearchSuggestions
                     parentId={parentIdQuery}
+                    onSearch={setQuery}
                 />
             ) : (
                 <SearchResults
