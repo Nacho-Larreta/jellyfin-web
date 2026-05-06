@@ -644,74 +644,78 @@ const AppUserMenu: FC<AppUserMenuProps> = ({
                 )}
             </Box>
 
-            {user?.Policy?.IsAdministrator && (
-                <>
-                    <Divider sx={{ borderColor: 'rgba(255,255,255,0.08)' }} />
+            {user?.Policy?.IsAdministrator && [
+                <Divider
+                    key='admin-divider'
+                    sx={{ borderColor: 'rgba(255,255,255,0.08)' }}
+                />,
 
-                    <Box sx={{ py: 1.35 }}>
-                        <Typography
-                            component='p'
+                <Box
+                    key='admin-actions'
+                    sx={{ py: 1.35 }}
+                >
+                    <Typography
+                        component='p'
+                        sx={{
+                            alignItems: 'center',
+                            color: 'rgba(255,255,255,0.40)',
+                            display: 'flex',
+                            fontSize: '0.72rem',
+                            fontWeight: 800,
+                            gap: 0.8,
+                            letterSpacing: '0.22em',
+                            mb: 0.75,
+                            px: 2.25,
+                            textTransform: 'uppercase'
+                        }}
+                    >
+                        <Box
+                            component='span'
                             sx={{
-                                alignItems: 'center',
-                                color: 'rgba(255,255,255,0.40)',
-                                display: 'flex',
-                                fontSize: '0.72rem',
-                                fontWeight: 800,
-                                gap: 0.8,
-                                letterSpacing: '0.22em',
-                                mb: 0.75,
-                                px: 2.25,
-                                textTransform: 'uppercase'
+                                backgroundColor: '#46D369',
+                                borderRadius: '50%',
+                                height: 6,
+                                width: 6
                             }}
-                        >
-                            <Box
-                                component='span'
-                                sx={{
-                                    backgroundColor: '#46D369',
-                                    borderRadius: '50%',
-                                    height: 6,
-                                    width: 6
-                                }}
-                            />
-                            {globalize.translate('HeaderAdmin')}
-                        </Typography>
+                        />
+                        {globalize.translate('HeaderAdmin')}
+                    </Typography>
 
+                    <MenuItem
+                        component={Link}
+                        to='/dashboard'
+                        onClick={onMenuClose}
+                        sx={MENU_ITEM_SX}
+                    >
+                        <ListItemIcon>
+                            <DashboardIcon fontSize='small' />
+                        </ListItemIcon>
+                        <ListItemText primary={globalize.translate('TabDashboard')} />
+                    </MenuItem>
+
+                    {!isQuickConnectEnabled && (
                         <MenuItem
                             component={Link}
-                            to='/dashboard'
+                            to='/dashboard/settings'
                             onClick={onMenuClose}
                             sx={MENU_ITEM_SX}
                         >
                             <ListItemIcon>
-                                <DashboardIcon fontSize='small' />
+                                <PhonelinkLock fontSize='small' />
                             </ListItemIcon>
-                            <ListItemText primary={globalize.translate('TabDashboard')} />
+                            <ListItemText
+                                primary={globalize.translate('QuickConnect')}
+                                secondary={globalize.translate('EnableQuickConnect')}
+                            />
                         </MenuItem>
+                    )}
 
-                        {!isQuickConnectEnabled && (
-                            <MenuItem
-                                component={Link}
-                                to='/dashboard/settings'
-                                onClick={onMenuClose}
-                                sx={MENU_ITEM_SX}
-                            >
-                                <ListItemIcon>
-                                    <PhonelinkLock fontSize='small' />
-                                </ListItemIcon>
-                                <ListItemText
-                                    primary={globalize.translate('QuickConnect')}
-                                    secondary={globalize.translate('EnableQuickConnect')}
-                                />
-                            </MenuItem>
-                        )}
-
-                        <ServerStatusRow
-                            onSelectServerClick={onSelectServerClick}
-                            serverName={serverName}
-                        />
-                    </Box>
-                </>
-            )}
+                    <ServerStatusRow
+                        onSelectServerClick={onSelectServerClick}
+                        serverName={serverName}
+                    />
+                </Box>
+            ]}
 
             <Divider sx={{ borderColor: 'rgba(255,255,255,0.08)' }} />
 

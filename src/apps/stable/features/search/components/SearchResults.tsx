@@ -20,6 +20,8 @@ import {
 interface SearchResultsProps {
     parentId?: string;
     collectionType?: CollectionType;
+    genre?: string;
+    collectionName?: string;
     query?: string;
 }
 
@@ -29,10 +31,16 @@ interface SearchResultsProps {
 const SearchResults: FC<SearchResultsProps> = ({
     parentId,
     collectionType,
+    genre,
+    collectionName,
     query
 }) => {
-    const { data, isPending } = useSearchItems(parentId, collectionType, query?.trim());
+    const { data, isPending } = useSearchItems(parentId, collectionType, query?.trim(), {
+        genre
+    });
     const [activeFilter, setActiveFilter] = useState('all');
+    const contextLabel = genre ? `Género: ${genre}` : collectionName || query;
+    const emptyLabel = contextLabel || globalize.translate('Search');
 
     useEffect(() => {
         if (activeFilter !== 'all' && data && !data.some(section => section.title === activeFilter)) {
@@ -53,10 +61,14 @@ const SearchResults: FC<SearchResultsProps> = ({
             <div className='search-screen__body search-no-results'>
                 <div className='search-no-results__panel'>
                     <p className='search-eyebrow'>{globalize.translate('Search')}</p>
-                    <h2>{globalize.translate('SearchResultsEmpty', query)}</h2>
+                    <h2>
+                        {query ?
+                            globalize.translate('SearchResultsEmpty', query) :
+                            `No encontré contenido para ${emptyLabel}`}
+                    </h2>
                     <p>Probá con un título más corto, una persona o alguno de los atajos de género.</p>
                 </div>
-                {collectionType && (
+                {collectionType && query && (
                     <div>
                         <Link
                             className='search-action-link'
@@ -97,7 +109,7 @@ const SearchResults: FC<SearchResultsProps> = ({
             </div>
 
             {activeFilter === 'all' && topResult && (
-                <TopResult item={topResult} query={query} />
+                <TopResult item={topResult} contextLabel={contextLabel} />
             )}
 
             <section className='search-section'>
@@ -144,7 +156,7 @@ const FilterPill = ({
     );
 };
 
-const TopResult = ({ item, query }: { item: BaseItemDto; query?: string }) => {
+const TopResult = ({ item, contextLabel }: { item: BaseItemDto; contextLabel?: string }) => {
     const { __legacyApiClient__ } = useApi();
     const backdropUrl = __legacyApiClient__ ?
         getItemBackdropImageUrl(__legacyApiClient__, item, {
@@ -175,7 +187,9 @@ const TopResult = ({ item, query }: { item: BaseItemDto; query?: string }) => {
                 )}
             </span>
             <span className='top-result__content'>
-                <span className='search-eyebrow'>Mejor resultado para &quot;{query}&quot;</span>
+                <span className='search-eyebrow'>
+                    {contextLabel ? `Mejor resultado para "${contextLabel}"` : 'Mejor resultado'}
+                </span>
                 <span className='top-result__title'>{item.Name}</span>
                 <span className='top-result__meta'>{getSearchItemSubtitle(item)}</span>
                 {item.Overview && (

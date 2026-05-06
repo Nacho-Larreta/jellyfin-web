@@ -13,49 +13,59 @@ import { fetchItemsByType } from './fetchItemsByType';
 import { useProgramsSearch } from './useProgramsSearch';
 import { LIVETV_CARD_OPTIONS } from '../constants/liveTvCardOptions';
 
+type SearchItemFilters = {
+    genre?: string;
+};
+
 export const useSearchItems = (
     parentId?: string,
     collectionType?: CollectionType,
-    searchTerm?: string
+    searchTerm?: string,
+    filters: SearchItemFilters = {}
 ) => {
-    const { data: artists, isPending: isArtistsPending } = useArtistsSearch(parentId, collectionType, searchTerm);
-    const { data: people, isPending: isPeoplePending } = usePeopleSearch(parentId, collectionType, searchTerm);
-    const { data: videos, isPending: isVideosPending } = useVideoSearch(parentId, collectionType, searchTerm);
-    const { data: programs, isPending: isProgramsPending } = useProgramsSearch(parentId, collectionType, searchTerm);
-    const { data: liveTvSections, isPending: isLiveTvPending } = useLiveTvSearch(parentId, collectionType, searchTerm);
+    const normalizedGenre = filters.genre?.trim() || undefined;
+    const hasGenreFilter = Boolean(normalizedGenre);
+    const auxiliarySearchTerm = hasGenreFilter ? undefined : searchTerm;
+    const { data: artists, isPending: isArtistsPending } = useArtistsSearch(parentId, collectionType, auxiliarySearchTerm);
+    const { data: people, isPending: isPeoplePending } = usePeopleSearch(parentId, collectionType, auxiliarySearchTerm);
+    const { data: videos, isPending: isVideosPending } = useVideoSearch(parentId, collectionType, auxiliarySearchTerm);
+    const { data: programs, isPending: isProgramsPending } = useProgramsSearch(parentId, collectionType, auxiliarySearchTerm);
+    const { data: liveTvSections, isPending: isLiveTvPending } = useLiveTvSearch(parentId, collectionType, auxiliarySearchTerm);
     const { api, user } = useApi();
     const userId = user?.Id;
 
-    const isArtistsEnabled = !isArtistsPending || (collectionType && !isMusic(collectionType));
-    const isPeopleEnabled = !isPeoplePending || (collectionType && !isMovies(collectionType) && !isTVShows(collectionType));
-    const isVideosEnabled = !isVideosPending || collectionType;
-    const isProgramsEnabled = !isProgramsPending || collectionType;
-    const isLiveTvEnabled = !isLiveTvPending || !collectionType || !isLivetv(collectionType);
+    const isArtistsEnabled = hasGenreFilter || !isArtistsPending || (collectionType && !isMusic(collectionType));
+    const isPeopleEnabled = hasGenreFilter || !isPeoplePending || (collectionType && !isMovies(collectionType) && !isTVShows(collectionType));
+    const isVideosEnabled = hasGenreFilter || !isVideosPending || collectionType;
+    const isProgramsEnabled = hasGenreFilter || !isProgramsPending || collectionType;
+    const isLiveTvEnabled = hasGenreFilter || !isLiveTvPending || !collectionType || !isLivetv(collectionType);
 
     return useQuery({
-        queryKey: ['Search', 'Items', collectionType, parentId, searchTerm],
+        queryKey: ['Search', 'Items', collectionType, parentId, searchTerm, normalizedGenre],
         queryFn: async ({ signal }) => {
-            if (liveTvSections && collectionType && isLivetv(collectionType)) {
+            if (!hasGenreFilter && liveTvSections && collectionType && isLivetv(collectionType)) {
                 return sortSections(liveTvSections);
             }
 
             const sections: Section[] = [];
 
-            addSection(sections, 'Artists', artists?.Items, {
-                coverImage: true
-            });
+            if (!hasGenreFilter) {
+                addSection(sections, 'Artists', artists?.Items, {
+                    coverImage: true
+                });
 
-            addSection(sections, 'Programs', programs?.Items, {
-                ...LIVETV_CARD_OPTIONS
-            });
+                addSection(sections, 'Programs', programs?.Items, {
+                    ...LIVETV_CARD_OPTIONS
+                });
 
-            addSection(sections, 'People', people?.Items, {
-                coverImage: true
-            });
+                addSection(sections, 'People', people?.Items, {
+                    coverImage: true
+                });
 
-            addSection(sections, 'HeaderVideos', videos?.Items, {
-                showParentTitle: true
-            });
+                addSection(sections, 'HeaderVideos', videos?.Items, {
+                    showParentTitle: true
+                });
+            }
 
             const itemTypes: BaseItemKind[] = getItemTypesFromCollectionType(collectionType);
 
@@ -65,7 +75,8 @@ export const useSearchItems = (
                 {
                     includeItemTypes: itemTypes,
                     parentId,
-                    searchTerm,
+                    searchTerm: hasGenreFilter ? undefined : searchTerm,
+                    genres: normalizedGenre ? [normalizedGenre] : undefined,
                     isMissing: itemTypes.includes(BaseItemKind.Episode) && !user?.Configuration?.DisplayMissingEpisodes ? false : undefined,
                     limit: 800
                 },

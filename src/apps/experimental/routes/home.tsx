@@ -171,6 +171,7 @@ const Home = () => {
             >
                 <div className='tabContent pageTabContent' id='homeTab' data-index='0'>
                     <div className='tvHomeHero hide'></div>
+                    <div className='tvHomeDashboard hide'></div>
                     <div className='sections'></div>
                 </div>
                 <div className='tabContent pageTabContent' id='favoritesTab' data-index='1'>

@@ -36,6 +36,22 @@ const SearchFields: FC<SearchFieldsProps> = ({
         inputRef.current?.focus();
     }, [ onSearch ]);
 
+    const stabilizeTvFocus = useCallback(() => {
+        if (!layoutManager.tv) return;
+
+        const page = document.querySelector('#searchPage') as HTMLElement | null;
+        const pageScrollTop = page?.scrollTop;
+        const windowScrollY = window.scrollY;
+
+        window.requestAnimationFrame(() => {
+            if (page && pageScrollTop !== undefined) {
+                page.scrollTop = pageScrollTop;
+            }
+
+            window.scrollTo(window.scrollX, windowScrollY);
+        });
+    }, []);
+
     return (
         <div className='search-screen__hero padded-left padded-right'>
             <div className='search-hero'>
@@ -46,15 +62,14 @@ const SearchFields: FC<SearchFieldsProps> = ({
                         id='searchTextInput'
                         className='search-input__control'
                         type='text'
-                        data-keyboard='true'
-                        placeholder={globalize.translate('Search')}
+                        {...(!layoutManager.tv ? { 'data-keyboard': 'true' } : {})}
+                        placeholder='Busca títulos, personas, géneros...'
                         aria-label={globalize.translate('Search')}
                         autoComplete='off'
                         maxLength={40}
-                        // eslint-disable-next-line jsx-a11y/no-autofocus
-                        autoFocus
                         value={query}
                         onChange={onChange}
+                        onFocus={stabilizeTvFocus}
                     />
                 </label>
                 {query && (

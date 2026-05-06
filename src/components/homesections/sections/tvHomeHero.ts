@@ -4,6 +4,7 @@ import type { ApiClient } from 'jellyfin-apiclient';
 import escapeHtml from 'escape-html';
 
 import { playbackManager } from 'components/playback/playbackmanager';
+import { appRouter } from 'components/router/appRouter';
 import datetime from 'scripts/datetime';
 import globalize from 'lib/globalize';
 import { getItemBackdropImageUrl } from 'utils/jellyfin-apiclient/backdropImage';
@@ -92,26 +93,62 @@ function getEpisodeLabel(item: BaseItemDto): string | undefined {
     return parts.join(' - ') || undefined;
 }
 
-function getMetadata(item: BaseItemDto): string[] {
-    const metadata = [];
+function getEpisodeCode(item: BaseItemDto): string | undefined {
+    if (item.Type !== 'Episode') {
+        return undefined;
+    }
+
+    const parts = [];
+
+    if (item.ParentIndexNumber != null) {
+        parts.push(`S${item.ParentIndexNumber}`);
+    }
+
+    if (item.IndexNumber != null) {
+        parts.push(`E${item.IndexNumber}`);
+    }
+
+    return parts.join('·') || undefined;
+}
+
+function getRemainingLabel(item: BaseItemDto): string | undefined {
+    const playbackTicks = item.UserData?.PlaybackPositionTicks || 0;
+    const runtimeTicks = item.RunTimeTicks || 0;
+
+    if (!playbackTicks || !runtimeTicks || playbackTicks >= runtimeTicks) {
+        return undefined;
+    }
+
+    const ticksPerMinute = 600000000;
+    const minutes = Math.max(1, Math.ceil((runtimeTicks - playbackTicks) / ticksPerMinute));
+
+    return `${minutes} min restantes`;
+}
+
+function getMetadataHtml(item: BaseItemDto): string {
+    let html = '';
+
+    if (item.CommunityRating) {
+        html += '<span class="tvHomeHero__metadataItem tvHomeHero__metadataItem--match">' + item.CommunityRating.toFixed(1) + '/10</span>';
+    }
 
     if (item.ProductionYear) {
-        metadata.push(item.ProductionYear.toString());
+        html += '<span class="tvHomeHero__metadataItem">' + item.ProductionYear + '</span>';
     }
 
     if (item.OfficialRating) {
-        metadata.push(item.OfficialRating);
+        html += '<span class="tvHomeHero__metadataItem tvHomeHero__metadataItem--chip">' + escapeHtml(item.OfficialRating) + '</span>';
     }
 
     if (item.RunTimeTicks) {
-        metadata.push(datetime.getDisplayDuration(item.RunTimeTicks));
+        html += '<span class="tvHomeHero__metadataItem">' + escapeHtml(datetime.getDisplayDuration(item.RunTimeTicks)) + '</span>';
     }
 
-    if (item.CommunityRating) {
-        metadata.push(`${item.CommunityRating.toFixed(1)}/10`);
+    if (item.MediaSourceCount && item.MediaSourceCount > 1) {
+        html += '<span class="tvHomeHero__metadataItem tvHomeHero__metadataItem--chip">' + item.MediaSourceCount + ' versiones</span>';
     }
 
-    return metadata;
+    return html;
 }
 
 function getProgressPercent(item: BaseItemDto): number {
@@ -151,9 +188,12 @@ function getHeroHtml(apiClient: ApiClient, item: BaseItemDto): string {
     const primaryUrl = getPrimaryImageUrl(apiClient, item);
     const title = getHeroTitle(item);
     const episodeLabel = getEpisodeLabel(item);
-    const metadata = getMetadata(item);
+    const episodeCode = getEpisodeCode(item);
+    const metadataHtml = getMetadataHtml(item);
     const progressPercent = getProgressPercent(item);
+    const remainingLabel = getRemainingLabel(item);
     const overview = item.Overview || '';
+    const detailsUrl = appRouter.getRouteUrl(item);
 
     let html = '<section class="tvHomeHero__shell" aria-label="' + escapeHtml(globalize.translate('HeaderContinueWatching')) + '">';
 
@@ -165,15 +205,15 @@ function getHeroHtml(apiClient: ApiClient, item: BaseItemDto): string {
     html += '<div class="tvHomeHero__shade tvHomeHero__shade--bottom"></div>';
 
     html += '<div class="tvHomeHero__content">';
-    html += '<div class="tvHomeHero__eyebrow">' + escapeHtml(globalize.translate('HeaderContinueWatching')) + '</div>';
+    html += '<div class="tvHomeHero__eyebrow"><span class="tvHomeHero__eyebrowDot"></span><span>' + escapeHtml(globalize.translate('HeaderContinueWatching')) + '</span></div>';
     html += '<h1 class="tvHomeHero__title">' + escapeHtml(title) + '</h1>';
+
+    if (metadataHtml) {
+        html += '<div class="tvHomeHero__metadata">' + metadataHtml + '</div>';
+    }
 
     if (episodeLabel) {
         html += '<div class="tvHomeHero__episode">' + escapeHtml(episodeLabel) + '</div>';
-    }
-
-    if (metadata.length) {
-        html += '<div class="tvHomeHero__metadata">' + metadata.map(itemMetadata => '<span>' + escapeHtml(itemMetadata) + '</span>').join('') + '</div>';
     }
 
     if (overview) {
@@ -182,19 +222,29 @@ function getHeroHtml(apiClient: ApiClient, item: BaseItemDto): string {
 
     html += '<div class="tvHomeHero__progressGroup">';
     html += '<progress class="tvHomeHero__progress" max="100" value="' + progressPercent + '" aria-label="' + escapeHtml(globalize.translate('Played')) + '"></progress>';
-    html += '<span class="tvHomeHero__progressText">' + progressPercent + '%</span>';
+    html += '<span class="tvHomeHero__progressText">' + escapeHtml(remainingLabel || `${progressPercent}%`) + '</span>';
     html += '</div>';
 
-    html += '<button is="emby-button" type="button" class="raised button-submit tvHomeHero__button btnTvHomeHeroPlay">';
+    html += '<div class="tvHomeHero__actions">';
+    html += '<button is="emby-button" type="button" class="tvHomeHero__button tvHomeHero__button--primary btnTvHomeHeroPlay">';
     html += '<span class="material-icons play_arrow" aria-hidden="true"></span>';
     html += '<span>' + escapeHtml(globalize.translate(item.UserData?.PlaybackPositionTicks ? 'ButtonResume' : 'Play')) + '</span>';
     html += '</button>';
+    html += '<a is="emby-linkbutton" class="tvHomeHero__button tvHomeHero__button--secondary" href="' + escapeHtml(detailsUrl) + '">';
+    html += '<span class="material-icons info_outline" aria-hidden="true"></span>';
+    html += '<span>' + escapeHtml(globalize.translate('ButtonInfo')) + '</span>';
+    html += '</a>';
+    html += '</div>';
     html += '</div>';
 
     if (primaryUrl) {
         html += '<div class="tvHomeHero__posterFrame">';
         html += '<img class="tvHomeHero__poster" src="' + escapeHtml(primaryUrl) + '" alt="" loading="eager" />';
         html += '</div>';
+    }
+
+    if (episodeCode) {
+        html += '<div class="tvHomeHero__libraryTag">En tu biblioteca · ' + escapeHtml(episodeCode) + '</div>';
     }
 
     html += '</section>';
