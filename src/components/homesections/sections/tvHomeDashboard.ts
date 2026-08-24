@@ -11,6 +11,13 @@ import Dashboard from 'utils/dashboard';
 import { getItemBackdropImageUrl } from 'utils/jellyfin-apiclient/backdropImage';
 import { toApi } from 'utils/jellyfin-apiclient/compat';
 import { queryClient } from 'utils/query/queryClient';
+import globalize from 'lib/globalize';
+import {
+    aggregateHomeSectionResults,
+    getHomeLoadState,
+    type HomeLoadState,
+    type HomeSectionAggregation
+} from './homeLoadState';
 
 const TV_HOME_FIELDS = [
     'PrimaryImageAspectRatio',
@@ -46,6 +53,9 @@ const RECENT_LIBRARY_EXCLUDES = new Set([
     'folders',
     'boxsets'
 ]);
+
+const HOME_PAGE_WITHOUT_RESUME_HERO_CLASS = 'homePage--withoutResumeHero';
+const DASHBOARD_WITHOUT_RESUME_HERO_CLASS = 'tvHomeDashboard--withoutResumeHero';
 
 type LibraryTone = 'red' | 'blue' | 'purple' | 'green' | 'orange' | 'gray';
 
@@ -238,7 +248,7 @@ function getRemainingLabel(item: BaseItemDto): string | undefined {
     const ticksPerMinute = 600000000;
     const minutes = Math.max(1, Math.ceil((runtimeTicks - playbackTicks) / ticksPerMinute));
 
-    return `${minutes} min restantes`;
+    return globalize.translate('HomeMinutesRemaining', minutes);
 }
 
 function getEpisodeCode(item: BaseItemDto): string | undefined {
@@ -287,7 +297,7 @@ function getResumeSubtitle(item: BaseItemDto): string {
 function getNextUpSubtitle(item: BaseItemDto): string {
     const episodeCode = getEpisodeCode(item);
 
-    return episodeCode ? `Próximo · ${episodeCode}` : 'Próximo';
+    return episodeCode ? globalize.translate('HomeNextEpisodeCode', episodeCode) : globalize.translate('NextUp');
 }
 
 function getRecentlyAddedSubtitle(item: BaseItemDto): string {
@@ -327,11 +337,15 @@ function renderSectionAction(label: string, href: string): string {
     return '<a is="emby-linkbutton" class="tvHomeDashboard__sectionAction" href="' + escapeHtml(href) + '">' + escapeHtml(label) + ' ›</a>';
 }
 
-function renderLibrariesSection(libraries: BaseItemDto[], user: UserDto): string {
-    const visibleLibraries = libraries
+function getVisibleLibraries(libraries: BaseItemDto[]): LibraryViewModel[] {
+    return libraries
         .filter(item => !EXCLUDED_LIBRARY_TYPES.has((item.CollectionType || '').toLowerCase()))
         .map(getLibraryViewModel)
         .sort((a, b) => getLibraryPriority(a) - getLibraryPriority(b) || a.name.localeCompare(b.name));
+}
+
+function renderLibrariesSection(libraries: BaseItemDto[], user: UserDto): string {
+    const visibleLibraries = getVisibleLibraries(libraries);
 
     if (!visibleLibraries.length) {
         return '';
@@ -339,11 +353,11 @@ function renderLibrariesSection(libraries: BaseItemDto[], user: UserDto): string
 
     let adminLink = '';
     if (user.Policy?.IsAdministrator) {
-        adminLink = '<button is="emby-button" type="button" class="tvHomeDashboard__sectionAction tvHomeDashboard__sectionAction--button btnTvHomeManageLibraries">Administrar ›</button>';
+        adminLink = '<button is="emby-button" type="button" class="tvHomeDashboard__sectionAction tvHomeDashboard__sectionAction--button btnTvHomeManageLibraries">' + escapeHtml(globalize.translate('ManageLibrary')) + ' ›</button>';
     }
 
     let html = '<section class="tvHomeDashboard__section tvHomeDashboard__section--libraries">';
-    html += renderSectionHeader('Mis bibliotecas', undefined, adminLink);
+    html += renderSectionHeader(globalize.translate('HeaderMyMedia'), undefined, adminLink);
     html += '<div class="tvHomeDashboard__libraryRail">';
 
     visibleLibraries.forEach(library => {
@@ -466,7 +480,7 @@ function getNextUpItems(apiClient: ApiClient): Promise<BaseItemDto[]> {
     }).then(result => result.Items || []);
 }
 
-function getLatestItems(apiClient: ApiClient, libraries: BaseItemDto[], user: UserDto): Promise<BaseItemDto[]> {
+function getLatestItems(apiClient: ApiClient, libraries: BaseItemDto[], user: UserDto): Promise<HomeSectionAggregation<BaseItemDto>> {
     const excludedIds = new Set(user.Configuration?.LatestItemsExcludes || []);
     const eligibleLibraries = libraries.filter(item => {
         if (!item.Id || excludedIds.has(item.Id)) {
@@ -483,8 +497,8 @@ function getLatestItems(apiClient: ApiClient, libraries: BaseItemDto[], user: Us
         EnableImageTypes: 'Primary,Backdrop,Thumb',
         ParentId: library.Id
     })))
-        .then(results => results.flatMap(result => result.status === 'fulfilled' ? result.value : []))
-        .then(items => {
+        .then(aggregateHomeSectionResults)
+        .then(({ items, status }) => {
             const sortedItems = [...items].sort((a, b) => {
                 const left = a.DateCreated ? new Date(a.DateCreated).getTime() : 0;
                 const right = b.DateCreated ? new Date(b.DateCreated).getTime() : 0;
@@ -492,7 +506,10 @@ function getLatestItems(apiClient: ApiClient, libraries: BaseItemDto[], user: Us
                 return right - left;
             });
 
-            return sortedItems.slice(0, 14);
+            return {
+                items: sortedItems.slice(0, 14),
+                status
+            };
         });
 }
 
@@ -500,30 +517,55 @@ function getSettledItems(result: PromiseSettledResult<BaseItemDto[]>): BaseItemD
     return result.status === 'fulfilled' ? result.value : [];
 }
 
-function renderDashboard(apiClient: ApiClient, user: UserDto, libraries: BaseItemDto[], resumeItems: BaseItemDto[], nextUpItems: BaseItemDto[], latestItems: BaseItemDto[]): string {
+function setWithoutResumeHeroState(elem: HTMLElement, enabled: boolean): void {
+    elem.classList.toggle(DASHBOARD_WITHOUT_RESUME_HERO_CLASS, enabled);
+    elem.closest('.homePage')?.classList.toggle(HOME_PAGE_WITHOUT_RESUME_HERO_CLASS, enabled);
+}
+
+function renderLoadState(state: HomeLoadState): string {
+    if (state === 'ready') {
+        return '';
+    }
+
+    const messages = {
+        empty: [ 'HomeEmptyTitle', 'HomeEmptyBody' ],
+        partial: [ 'HomePartialTitle', 'HomePartialBody' ],
+        error: [ 'HomeErrorTitle', 'HomeErrorBody' ]
+    } as const;
+    const role = state === 'error' ? 'alert' : 'status';
+    const [ titleKey, bodyKey ] = messages[state];
+
+    return '<section class="tvHomeDashboard__loadState tvHomeDashboard__loadState--' + state + '" role="' + role + '">'
+        + '<h2>' + escapeHtml(globalize.translate(titleKey)) + '</h2>'
+        + '<p>' + escapeHtml(globalize.translate(bodyKey)) + '</p>'
+        + '</section>';
+}
+
+function renderDashboard(apiClient: ApiClient, user: UserDto, libraries: BaseItemDto[], resumeItems: BaseItemDto[], nextUpItems: BaseItemDto[], latestItems: BaseItemDto[], state: HomeLoadState): string {
     let html = '<div class="tvHomeDashboard__content">';
+    html += renderLoadState(state);
     html += renderLibrariesSection(libraries, user);
     html += renderRailSection(
         apiClient,
-        'Continuar viendo',
-        'Reanuda donde lo dejaste',
+        globalize.translate('HeaderContinueWatching'),
+        globalize.translate('HomeContinueWatchingHint'),
         resumeItems,
         (client, item) => renderWideCard(client, item, getResumeSubtitle(item), { showProgress: true }),
         'resume'
     );
     html += renderRailSection(
         apiClient,
-        'A continuación',
-        'Próximos episodios en tus series',
+        globalize.translate('NextUp'),
+        globalize.translate('HomeNextUpHint'),
         nextUpItems,
-        (client, item) => renderWideCard(client, item, getNextUpSubtitle(item), { badge: 'PRÓXIMO' }),
+        (client, item) => renderWideCard(client, item, getNextUpSubtitle(item), { badge: globalize.translate('NextUp').toLocaleUpperCase() }),
         'nextUp',
-        renderSectionAction('VER TODO', appRouter.getRouteUrl('nextup', { serverId: apiClient.serverId() }))
+        renderSectionAction(globalize.translate('ViewAll'), appRouter.getRouteUrl('nextup', { serverId: apiClient.serverId() }))
     );
     html += renderRailSection(
         apiClient,
-        'Recién agregado',
-        'Nuevo en tu servidor',
+        globalize.translate('RecentlyAdded'),
+        globalize.translate('HomeRecentlyAddedHint'),
         latestItems,
         (client, item) => renderWideCard(client, item, getRecentlyAddedSubtitle(item)),
         'latest'
@@ -540,6 +582,7 @@ export function destroyTvHomeDashboard(elem: HTMLElement | null) {
 
     elem.innerHTML = '';
     elem.classList.add('hide');
+    setWithoutResumeHeroState(elem, false);
 }
 
 export function loadTvHomeDashboard(elem: HTMLElement | null, apiClient: ApiClient): Promise<void> {
@@ -558,15 +601,26 @@ export function loadTvHomeDashboard(elem: HTMLElement | null, apiClient: ApiClie
             getResumeItems(apiClient),
             getNextUpItems(apiClient),
             getLatestItems(apiClient, libraries, user)
-        ]).then(([resumeItems, nextUpItems, latestItems]) => ({
-            user,
-            libraries,
-            resumeItems: getSettledItems(resumeItems),
-            nextUpItems: getSettledItems(nextUpItems),
-            latestItems: getSettledItems(latestItems)
-        })))
-        .then(({ user, libraries, resumeItems, nextUpItems, latestItems }) => {
-            elem.innerHTML = renderDashboard(apiClient, user, libraries, resumeItems, nextUpItems, latestItems);
+        ]).then(([resumeItems, nextUpItems, latestItems]) => {
+            const latestSection = latestItems.status === 'fulfilled' ? latestItems.value : {
+                items: [],
+                status: 'rejected' as const
+            };
+
+            return {
+                user,
+                libraries,
+                sectionStatuses: [ resumeItems.status, nextUpItems.status, latestSection.status ],
+                resumeItems: getSettledItems(resumeItems),
+                nextUpItems: getSettledItems(nextUpItems),
+                latestItems: latestSection.items
+            };
+        }))
+        .then(({ user, libraries, sectionStatuses, resumeItems, nextUpItems, latestItems }) => {
+            const hasMedia = Boolean(resumeItems.length || nextUpItems.length || latestItems.length);
+            const loadState = getHomeLoadState(Boolean(getVisibleLibraries(libraries).length), sectionStatuses, hasMedia);
+            elem.innerHTML = renderDashboard(apiClient, user, libraries, resumeItems, nextUpItems, latestItems, loadState);
+            setWithoutResumeHeroState(elem, !resumeItems.length);
             elem.classList.remove('hide');
             elem.classList.remove('is-loading');
 
@@ -575,7 +629,9 @@ export function loadTvHomeDashboard(elem: HTMLElement | null, apiClient: ApiClie
             });
         })
         .catch(err => {
+            elem.innerHTML = renderLoadState('error');
+            elem.classList.remove('hide');
             elem.classList.remove('is-loading');
-            throw err;
+            console.error('Failed to load TV Home dashboard.', err);
         });
 }

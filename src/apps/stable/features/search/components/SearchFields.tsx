@@ -60,10 +60,11 @@ const SearchFields: FC<SearchFieldsProps> = ({
                     <input
                         ref={inputRef}
                         id='searchTextInput'
+                        name='searchQuery'
                         className='search-input__control'
                         type='text'
                         {...(!layoutManager.tv ? { 'data-keyboard': 'true' } : {})}
-                        placeholder='Busca títulos, personas, géneros...'
+                        placeholder={globalize.translate('SearchInputPlaceholder')}
                         aria-label={globalize.translate('Search')}
                         autoComplete='off'
                         maxLength={40}
@@ -76,7 +77,7 @@ const SearchFields: FC<SearchFieldsProps> = ({
                     <button
                         type='button'
                         className='search-input__clear'
-                        aria-label='Limpiar búsqueda'
+                        aria-label={globalize.translate('SearchClearInput')}
                         onClick={onClear}
                     >
                         <span aria-hidden='true'>&times;</span>

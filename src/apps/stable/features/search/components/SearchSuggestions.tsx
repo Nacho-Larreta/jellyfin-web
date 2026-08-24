@@ -8,6 +8,7 @@ import { Link } from 'react-router-dom';
 
 import Loading from 'components/loading/LoadingComponent';
 import { appRouter } from 'components/router/appRouter';
+import globalize from 'lib/globalize';
 import { useSearchSuggestions } from '../api/useSearchSuggestions';
 import { useApi } from 'hooks/useApi';
 import {
@@ -18,7 +19,16 @@ import {
     useExploreGenres,
     useSearchHistory
 } from '../api/useSearchDiscovery';
-import { getSearchItemImageUrl, getSearchItemInitials } from '../utils/search';
+import {
+    getSearchItemImageUrl,
+    getSearchItemInitials,
+    getSearchItemSubtitle
+} from '../utils/search';
+import {
+    getCollectionBrowseUrl,
+    getGenreBrowseUrl,
+    normalizeRouterUrl
+} from '../utils/searchRoutes';
 
 type SearchShortcut = {
     label: string;
@@ -43,23 +53,20 @@ const getItemMeta = (item: BaseItemDto) => {
         item.ProductionYear?.toString()
     ].filter(Boolean);
 
-    return segments.join(' · ') || 'En tu biblioteca';
+    return getSearchItemSubtitle(item) || segments.join(' · ') || globalize.translate('SearchInYourLibrary');
 };
 
 const getExploreItemName = (item: ExploreItemDto) => item.Name || item.Item?.Name || '';
 
 const getExploreItemCountLabel = (item: ExploreItemDto) => {
-    const count = item.ItemCount ?? 0;
-    return `${count} ${count === 1 ? 'título' : 'títulos'}`;
+    const count = item.ItemCount;
+
+    if (count === undefined) {
+        return null;
+    }
+
+    return globalize.translate(count === 1 ? 'SearchTitleCount' : 'SearchTitlesCount', count);
 };
-
-const getGenreBrowseUrl = (name: string) => `/search?genre=${encodeURIComponent(name)}`;
-
-const getCollectionBrowseUrl = (item: ExploreItemDto, name: string) => (
-    item.Id ?
-        `/search?parentId=${encodeURIComponent(item.Id)}&collectionName=${encodeURIComponent(name)}` :
-        undefined
-);
 
 const getExploreItemRouteUrl = (
     item: ExploreItemDto,
@@ -70,7 +77,11 @@ const getExploreItemRouteUrl = (
         return getGenreBrowseUrl(name);
     }
 
-    return item.Item ? appRouter.getRouteUrl(item.Item) : getCollectionBrowseUrl(item, name);
+    if (item.Item) {
+        return normalizeRouterUrl(appRouter.getRouteUrl(item.Item));
+    }
+
+    return item.Id ? getCollectionBrowseUrl(item.Id, name) : undefined;
 };
 
 const getExploreTileStyle = (imageUrl?: string | null): CSSProperties | undefined => {
@@ -142,11 +153,15 @@ const ExploreTileCard = ({
         imageUrl ? 'genre-tile--has-image' : ''
     ].filter(Boolean).join(' ');
     const style = getExploreTileStyle(imageUrl);
+    const countLabel = getExploreItemCountLabel(item);
+    const onTileSearch = useCallback(() => {
+        onSearch(name);
+    }, [ name, onSearch ]);
 
     const content = (
         <>
             <span className='genre-tile__name'>{name}</span>
-            <span className='genre-tile__count'>{getExploreItemCountLabel(item)}</span>
+            {countLabel && <span className='genre-tile__count'>{countLabel}</span>}
         </>
     );
 
@@ -167,7 +182,7 @@ const ExploreTileCard = ({
             type='button'
             className={className}
             style={style}
-            onClick={() => onSearch(name)}
+            onClick={onTileSearch}
         >
             {content}
         </button>
@@ -182,7 +197,7 @@ const TrendingItemCard = ({ item, rank }: { item: BaseItemDto; rank: number }) =
     });
 
     return (
-        <Link className='trend-card' to={appRouter.getRouteUrl(item)}>
+        <Link className='trend-card' to={normalizeRouterUrl(appRouter.getRouteUrl(item))}>
             <span className='trend-card__rank'>{rank}</span>
             <span className='trend-card__thumb'>
                 {imageUrl ? (
@@ -200,20 +215,37 @@ const TrendingItemCard = ({ item, rank }: { item: BaseItemDto; rank: number }) =
 };
 
 const SearchSuggestions: FunctionComponent<SearchSuggestionsProps> = ({ parentId, onSearch }) => {
-    const { data: suggestions, isPending: suggestionsPending } = useSearchSuggestions(parentId || undefined);
-    const { data: history, isPending: historyPending } = useSearchHistory();
-    const { data: genres, isPending: genresPending } = useExploreGenres(parentId || undefined);
-    const { data: collections, isPending: collectionsPending } = useExploreCollections();
+    const suggestionsQuery = useSearchSuggestions(parentId || undefined);
+    const historyQuery = useSearchHistory();
+    const genresQuery = useExploreGenres(parentId || undefined);
+    const collectionsQuery = useExploreCollections();
     const {
         mutate: clearSearchHistory,
-        isPending: isClearingHistory
+        isPending: isClearingHistory,
+        isReady: isClearHistoryReady
     } = useClearSearchHistory();
+    const suggestions = suggestionsQuery.data;
+    const history = historyQuery.data;
+    const genres = genresQuery.data;
+    const collections = collectionsQuery.data;
+    const discoveryQueries = [ suggestionsQuery, historyQuery, genresQuery, collectionsQuery ];
+    const hasDiscoveryError = discoveryQueries.some(query => query.isError);
+    const isDiscoveryPending = discoveryQueries.every(query => query.isPending);
 
     const onClearHistory = useCallback(() => {
         clearSearchHistory();
     }, [ clearSearchHistory ]);
 
-    if (suggestionsPending && historyPending && genresPending && collectionsPending) {
+    const onRetry = useCallback(() => {
+        Promise.all([
+            suggestionsQuery.refetch(),
+            historyQuery.refetch(),
+            genresQuery.refetch(),
+            collectionsQuery.refetch()
+        ]).catch(error => console.error('Failed to retry search discovery.', error));
+    }, [ collectionsQuery, genresQuery, historyQuery, suggestionsQuery ]);
+
+    if (isDiscoveryPending) {
         return (
             <div className='search-screen__body'>
                 <Loading />
@@ -231,13 +263,26 @@ const SearchSuggestions: FunctionComponent<SearchSuggestionsProps> = ({ parentId
         .filter(item => getExploreItemName(item))
         .slice(0, 12);
     const trendingItems = suggestions?.slice(0, 6) || [];
+    const hasDiscoveryData = Boolean(
+        historyEntries.length || genreItems.length || collectionItems.length || trendingItems.length
+    );
+
+    if (hasDiscoveryError && !hasDiscoveryData) {
+        return <SearchDiscoveryError onRetry={onRetry} />;
+    }
 
     return (
         <div className='search-screen__body search-empty-state search-discovery'>
+            {hasDiscoveryError && (
+                <div className='search-discovery-status' role='status'>
+                    <span>{globalize.translate('SearchDiscoveryPartialError')}</span>
+                    <button type='button' onClick={onRetry}>{globalize.translate('Retry')}</button>
+                </div>
+            )}
             {historyEntries.length > 0 && (
                 <section className='search-section search-section--recent'>
-                    <h2 className='search-section__title'>Búsquedas recientes</h2>
-                    <div className='recent-chip-list' aria-label='Búsquedas recientes'>
+                    <h2 className='search-section__title'>{globalize.translate('SearchRecentSearches')}</h2>
+                    <div className='recent-chip-list' aria-label={globalize.translate('SearchRecentSearches')}>
                         {historyEntries.map(search => (
                             <RecentSearchChip
                                 key={`${search.SearchTerm}-${search.LastSearchedUtc}`}
@@ -248,10 +293,10 @@ const SearchSuggestions: FunctionComponent<SearchSuggestionsProps> = ({ parentId
                         <button
                             type='button'
                             className='recent-history-clear'
-                            disabled={isClearingHistory}
+                            disabled={isClearingHistory || !isClearHistoryReady}
                             onClick={onClearHistory}
                         >
-                            Borrar historial
+                            {globalize.translate('SearchClearHistory')}
                         </button>
                     </div>
                 </section>
@@ -260,8 +305,8 @@ const SearchSuggestions: FunctionComponent<SearchSuggestionsProps> = ({ parentId
             {genreItems.length > 0 && (
                 <section className='search-section'>
                     <div className='search-section__header'>
-                        <h2 className='search-section__title'>Explorar por género</h2>
-                        <span className='search-section__meta'>Tocá uno para ver todo el contenido</span>
+                        <h2 className='search-section__title'>{globalize.translate('SearchExploreByGenre')}</h2>
+                        <span className='search-section__meta'>{globalize.translate('SearchExploreGenreHint')}</span>
                     </div>
                     <div className='genre-tile-grid genre-tile-grid--browse'>
                         {genreItems.map(genre => (
@@ -279,8 +324,8 @@ const SearchSuggestions: FunctionComponent<SearchSuggestionsProps> = ({ parentId
             {collectionItems.length > 0 && (
                 <section className='search-section'>
                     <div className='search-section__header'>
-                        <h2 className='search-section__title'>Explorar por colección</h2>
-                        <span className='search-section__meta'>Sagas y grupos curados de tu servidor</span>
+                        <h2 className='search-section__title'>{globalize.translate('SearchExploreByCollection')}</h2>
+                        <span className='search-section__meta'>{globalize.translate('SearchExploreCollectionHint')}</span>
                     </div>
                     <div className='genre-tile-grid genre-tile-grid--browse genre-tile-grid--collections'>
                         {collectionItems.map(collection => (
@@ -298,8 +343,8 @@ const SearchSuggestions: FunctionComponent<SearchSuggestionsProps> = ({ parentId
             {trendingItems.length > 0 && (
                 <section className='search-section'>
                     <div className='search-section__header'>
-                        <h2 className='search-section__title'>Lo más buscado</h2>
-                        <span className='search-section__meta'>En tu servidor esta semana</span>
+                        <h2 className='search-section__title'>{globalize.translate('SearchTrending')}</h2>
+                        <span className='search-section__meta'>{globalize.translate('SearchTrendingHint')}</span>
                     </div>
                     <div className='trend-row'>
                         {trendingItems.map((item, index) => (
@@ -316,13 +361,25 @@ const SearchSuggestions: FunctionComponent<SearchSuggestionsProps> = ({ parentId
             {!historyEntries.length && !genreItems.length && !collectionItems.length && !trendingItems.length && (
                 <section className='search-no-results'>
                     <div className='search-no-results__panel'>
-                        <h2>Tu biblioteca todavía no tiene datos para explorar</h2>
-                        <p>Agregá contenido o empezá a buscar para crear historial por perfil.</p>
+                        <h2>{globalize.translate('SearchDiscoveryEmptyTitle')}</h2>
+                        <p>{globalize.translate('SearchDiscoveryEmptyBody')}</p>
                     </div>
                 </section>
             )}
         </div>
     );
 };
+
+const SearchDiscoveryError = ({ onRetry }: { onRetry: () => void }) => (
+    <div className='search-screen__body search-no-results' role='alert'>
+        <div className='search-no-results__panel'>
+            <h2>{globalize.translate('SearchDiscoveryErrorTitle')}</h2>
+            <p>{globalize.translate('SearchDiscoveryErrorBody')}</p>
+            <button type='button' className='search-action-link' onClick={onRetry}>
+                {globalize.translate('Retry')}
+            </button>
+        </div>
+    </div>
+);
 
 export default SearchSuggestions;

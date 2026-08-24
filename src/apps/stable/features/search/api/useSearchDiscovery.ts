@@ -1,4 +1,9 @@
-import type { BaseItemDto } from '@jellyfin/sdk/lib/generated-client/models/base-item-dto';
+import type { Api } from '@jellyfin/sdk';
+import { BaseItemKind } from '@jellyfin/sdk/lib/generated-client/models/base-item-kind';
+import { ItemSortBy } from '@jellyfin/sdk/lib/generated-client/models/item-sort-by';
+import { SortOrder } from '@jellyfin/sdk/lib/generated-client/models/sort-order';
+import { getGenresApi } from '@jellyfin/sdk/lib/utils/api/genres-api';
+import { getItemsApi } from '@jellyfin/sdk/lib/utils/api/items-api';
 import type { ApiClient } from 'jellyfin-apiclient';
 import { useMutation, useQuery } from '@tanstack/react-query';
 
@@ -6,41 +11,22 @@ import { useApi } from 'hooks/useApi';
 import { getCurrentProfileSelector } from 'lib/profileSelector/api';
 import { getActiveProfile } from 'lib/profileSelector/utils';
 import { queryClient } from 'utils/query/queryClient';
+import {
+    clearSearchHistory,
+    fetchExploreCollections,
+    fetchExploreGenres,
+    fetchSearchHistory,
+    recordSearchHistory,
+    requireSearchMutationContext,
+    SEARCH_DISCOVERY_LIMITS,
+    toStandardExploreItem,
+    type ExploreItemDto,
+    type ExploreSectionDto,
+    type SearchDiscoveryFallback,
+    type SearchProfileContext
+} from './searchDiscoveryApi';
 
-export type SearchHistoryEntryDto = {
-    SearchTerm: string;
-    HitCount: number;
-    LastSearchedUtc: string;
-};
-
-export type ExploreItemDto = {
-    Id?: string;
-    Name?: string;
-    Overview?: string | null;
-    Type?: string;
-    Item?: BaseItemDto | null;
-    ItemCount?: number;
-    RepresentativeItem?: BaseItemDto | null;
-    Children?: ExploreItemDto[];
-};
-
-type ExploreSectionDto = {
-    Id?: string;
-    Name?: string;
-    Items?: ExploreItemDto[];
-    TotalRecordCount?: number;
-};
-
-type SearchProfileContext = {
-    ownerUserId: string;
-    profileUserId: string;
-    userId: string;
-    serverId: string;
-};
-
-const SEARCH_HISTORY_LIMIT = 8;
-const EXPLORE_GENRE_LIMIT = 12;
-const EXPLORE_COLLECTION_LIMIT = 24;
+export type { ExploreItemDto, SearchHistoryEntryDto } from './searchDiscoveryApi';
 
 const searchProfileContextKey = (apiClient?: ApiClient, userId?: string) => [
     'SearchDiscovery',
@@ -87,61 +73,42 @@ const getSearchProfileContext = async (apiClient: ApiClient, userId: string): Pr
     };
 };
 
-const fetchSearchHistory = async (
-    apiClient: ApiClient,
-    context: SearchProfileContext
-): Promise<SearchHistoryEntryDto[]> => {
-    return apiClient.getJSON(apiClient.getUrl(
-        `Users/${context.ownerUserId}/Profiles/${context.profileUserId}/Search/History`,
-        { Limit: SEARCH_HISTORY_LIMIT }
-    ), true);
-};
+const toExploreSection = (items: ExploreItemDto[], totalRecordCount?: number): ExploreSectionDto => ({
+    Items: items,
+    TotalRecordCount: totalRecordCount ?? items.length
+});
 
-const recordSearchHistory = async (
-    apiClient: ApiClient,
-    context: SearchProfileContext,
-    searchTerm: string
-) => {
-    await apiClient.ajax({
-        type: 'POST',
-        url: apiClient.getUrl(`Users/${context.ownerUserId}/Profiles/${context.profileUserId}/Search/History`),
-        contentType: 'application/json',
-        data: JSON.stringify({ SearchTerm: searchTerm })
-    });
-};
+const createStandardDiscoveryFallback = (api: Api): SearchDiscoveryFallback => ({
+    fetchGenres: async (context, parentId) => {
+        const response = await getGenresApi(api).getGenres({
+            userId: context.userId,
+            parentId,
+            limit: SEARCH_DISCOVERY_LIMITS.genres,
+            sortBy: [ ItemSortBy.SortName ],
+            sortOrder: [ SortOrder.Ascending ],
+            enableImages: true,
+            enableTotalRecordCount: true
+        });
+        const items = (response.data.Items || []).map(toStandardExploreItem);
 
-const clearSearchHistory = async (
-    apiClient: ApiClient,
-    context: SearchProfileContext
-) => {
-    await apiClient.ajax({
-        type: 'DELETE',
-        url: apiClient.getUrl(`Users/${context.ownerUserId}/Profiles/${context.profileUserId}/Search/History`)
-    });
-};
+        return toExploreSection(items, response.data.TotalRecordCount);
+    },
+    fetchCollections: async context => {
+        const response = await getItemsApi(api).getItems({
+            userId: context.userId,
+            includeItemTypes: [ BaseItemKind.BoxSet ],
+            recursive: true,
+            limit: SEARCH_DISCOVERY_LIMITS.collections,
+            sortBy: [ ItemSortBy.SortName ],
+            sortOrder: [ SortOrder.Ascending ],
+            enableImages: true,
+            enableTotalRecordCount: true
+        });
+        const items = (response.data.Items || []).map(toStandardExploreItem);
 
-const fetchExploreGenres = async (
-    apiClient: ApiClient,
-    context: SearchProfileContext
-): Promise<ExploreSectionDto> => {
-    return apiClient.getJSON(apiClient.getUrl(
-        `Users/${context.userId}/Explore/Genres`,
-        { Limit: EXPLORE_GENRE_LIMIT }
-    ), true);
-};
-
-const fetchExploreCollections = async (
-    apiClient: ApiClient,
-    context: SearchProfileContext
-): Promise<ExploreSectionDto> => {
-    return apiClient.getJSON(apiClient.getUrl(
-        `Users/${context.userId}/Explore/Collections`,
-        {
-            Limit: EXPLORE_COLLECTION_LIMIT,
-            Depth: 3
-        }
-    ), true);
-};
+        return toExploreSection(items, response.data.TotalRecordCount);
+    }
+});
 
 export const useSearchProfileContext = () => {
     const { __legacyApiClient__, user } = useApi();
@@ -174,14 +141,19 @@ export const useSearchHistory = () => {
 };
 
 export const useExploreGenres = (parentId?: string) => {
-    const { __legacyApiClient__ } = useApi();
+    const { api, __legacyApiClient__ } = useApi();
     const profileContextQuery = useSearchProfileContext();
     const context = profileContextQuery.data;
 
     const query = useQuery({
         queryKey: searchGenresKey(context, parentId),
-        queryFn: () => fetchExploreGenres(__legacyApiClient__!, context!),
-        enabled: !!__legacyApiClient__ && !!context
+        queryFn: () => fetchExploreGenres(
+            __legacyApiClient__!,
+            context!,
+            createStandardDiscoveryFallback(api!),
+            parentId
+        ),
+        enabled: !!api && !!__legacyApiClient__ && !!context
     });
 
     return {
@@ -191,14 +163,18 @@ export const useExploreGenres = (parentId?: string) => {
 };
 
 export const useExploreCollections = () => {
-    const { __legacyApiClient__ } = useApi();
+    const { api, __legacyApiClient__ } = useApi();
     const profileContextQuery = useSearchProfileContext();
     const context = profileContextQuery.data;
 
     const query = useQuery({
         queryKey: searchCollectionsKey(context),
-        queryFn: () => fetchExploreCollections(__legacyApiClient__!, context!),
-        enabled: !!__legacyApiClient__ && !!context
+        queryFn: () => fetchExploreCollections(
+            __legacyApiClient__!,
+            context!,
+            createStandardDiscoveryFallback(api!)
+        ),
+        enabled: !!api && !!__legacyApiClient__ && !!context
     });
 
     return {
@@ -212,13 +188,21 @@ export const useRecordSearchHistory = () => {
     const profileContextQuery = useSearchProfileContext();
     const context = profileContextQuery.data;
 
-    return useMutation({
-        mutationFn: (searchTerm: string) => recordSearchHistory(__legacyApiClient__!, context!, searchTerm),
+    const mutation = useMutation({
+        mutationFn: (searchTerm: string) => {
+            const ready = requireSearchMutationContext(__legacyApiClient__, context);
+            return recordSearchHistory(ready.apiClient, ready.context, searchTerm);
+        },
         onSuccess: () => {
             void queryClient.invalidateQueries({ queryKey: searchHistoryKey(context) });
         },
         retry: false
     });
+
+    return {
+        ...mutation,
+        isReady: !!__legacyApiClient__ && !!context
+    };
 };
 
 export const useClearSearchHistory = () => {
@@ -226,11 +210,19 @@ export const useClearSearchHistory = () => {
     const profileContextQuery = useSearchProfileContext();
     const context = profileContextQuery.data;
 
-    return useMutation({
-        mutationFn: () => clearSearchHistory(__legacyApiClient__!, context!),
+    const mutation = useMutation({
+        mutationFn: () => {
+            const ready = requireSearchMutationContext(__legacyApiClient__, context);
+            return clearSearchHistory(ready.apiClient, ready.context);
+        },
         onSuccess: () => {
             void queryClient.invalidateQueries({ queryKey: searchHistoryKey(context) });
         },
         retry: false
     });
+
+    return {
+        ...mutation,
+        isReady: !!__legacyApiClient__ && !!context
+    };
 };

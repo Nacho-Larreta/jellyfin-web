@@ -3,7 +3,8 @@ import type { BaseItemDto } from '@jellyfin/sdk/lib/generated-client/models/base
 import { CollectionType } from '@jellyfin/sdk/lib/generated-client/models/collection-type';
 import { useQuery } from '@tanstack/react-query';
 import { useApi } from '../../../../../hooks/useApi';
-import { addSection, getCardOptionsFromType, getItemTypesFromCollectionType, getTitleFromType, isLivetv, isMovies, isMusic, isTVShows, sortSections } from '../utils/search';
+import { addSection, getItemTypesFromCollectionType, isLivetv, isMovies, isMusic, isTVShows, sortSections } from '../utils/search';
+import { buildSearchResultData } from '../utils/searchResultData';
 import { useArtistsSearch } from './useArtistsSearch';
 import { usePeopleSearch } from './usePeopleSearch';
 import { useVideoSearch } from './useVideoSearch';
@@ -15,6 +16,41 @@ import { LIVETV_CARD_OPTIONS } from '../constants/liveTvCardOptions';
 
 type SearchItemFilters = {
     genre?: string;
+};
+
+type SearchItemsResult = {
+    Items?: BaseItemDto[] | null;
+};
+
+const isAuxiliarySearchReady = (
+    hasGenreFilter: boolean,
+    isPending: boolean,
+    collectionType: CollectionType | undefined,
+    isCollectionTypeEnabled: boolean
+): boolean => hasGenreFilter || !isPending || (!!collectionType && isCollectionTypeEnabled);
+
+const addAuxiliarySections = (
+    sections: Section[],
+    artists?: SearchItemsResult,
+    programs?: SearchItemsResult,
+    people?: SearchItemsResult,
+    videos?: SearchItemsResult
+) => {
+    addSection(sections, 'Artists', artists?.Items, {
+        coverImage: true
+    });
+
+    addSection(sections, 'Programs', programs?.Items, {
+        ...LIVETV_CARD_OPTIONS
+    });
+
+    addSection(sections, 'People', people?.Items, {
+        coverImage: true
+    });
+
+    addSection(sections, 'HeaderVideos', videos?.Items, {
+        showParentTitle: true
+    });
 };
 
 export const useSearchItems = (
@@ -34,37 +70,32 @@ export const useSearchItems = (
     const { api, user } = useApi();
     const userId = user?.Id;
 
-    const isArtistsEnabled = hasGenreFilter || !isArtistsPending || (collectionType && !isMusic(collectionType));
-    const isPeopleEnabled = hasGenreFilter || !isPeoplePending || (collectionType && !isMovies(collectionType) && !isTVShows(collectionType));
-    const isVideosEnabled = hasGenreFilter || !isVideosPending || collectionType;
-    const isProgramsEnabled = hasGenreFilter || !isProgramsPending || collectionType;
+    const isArtistsEnabled = isAuxiliarySearchReady(hasGenreFilter, isArtistsPending, collectionType, collectionType ? !isMusic(collectionType) : false);
+    const isPeopleEnabled = isAuxiliarySearchReady(
+        hasGenreFilter,
+        isPeoplePending,
+        collectionType,
+        collectionType ? !isMovies(collectionType) && !isTVShows(collectionType) : false
+    );
+    const isVideosEnabled = isAuxiliarySearchReady(hasGenreFilter, isVideosPending, collectionType, true);
+    const isProgramsEnabled = isAuxiliarySearchReady(hasGenreFilter, isProgramsPending, collectionType, true);
     const isLiveTvEnabled = hasGenreFilter || !isLiveTvPending || !collectionType || !isLivetv(collectionType);
 
     return useQuery({
         queryKey: ['Search', 'Items', collectionType, parentId, searchTerm, normalizedGenre],
         queryFn: async ({ signal }) => {
             if (!hasGenreFilter && liveTvSections && collectionType && isLivetv(collectionType)) {
-                return sortSections(liveTvSections);
+                const sections = sortSections(liveTvSections);
+                return {
+                    sections,
+                    topResult: sections[0]?.items[0]
+                };
             }
 
             const sections: Section[] = [];
 
             if (!hasGenreFilter) {
-                addSection(sections, 'Artists', artists?.Items, {
-                    coverImage: true
-                });
-
-                addSection(sections, 'Programs', programs?.Items, {
-                    ...LIVETV_CARD_OPTIONS
-                });
-
-                addSection(sections, 'People', people?.Items, {
-                    coverImage: true
-                });
-
-                addSection(sections, 'HeaderVideos', videos?.Items, {
-                    showParentTitle: true
-                });
+                addAuxiliarySections(sections, artists, programs, people, videos);
             }
 
             const itemTypes: BaseItemKind[] = getItemTypesFromCollectionType(collectionType);
@@ -83,19 +114,7 @@ export const useSearchItems = (
                 { signal }
             );
 
-            if (searchData.Items) {
-                for (const itemType of itemTypes) {
-                    const items: BaseItemDto[] = [];
-                    for (const searchItem of searchData.Items) {
-                        if (searchItem.Type === itemType) {
-                            items.push(searchItem);
-                        }
-                    }
-                    addSection(sections, getTitleFromType(itemType), items, getCardOptionsFromType(itemType));
-                }
-            }
-
-            return sortSections(sections);
+            return buildSearchResultData(sections, itemTypes, searchData.Items || []);
         },
         enabled: (
             !!api

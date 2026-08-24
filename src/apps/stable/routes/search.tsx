@@ -27,18 +27,19 @@ const Search: FC = () => {
     const [ query, setQuery ] = useSearchParam(QUERY_PARAM);
     const [debouncedQuery] = useDebounceValue(query, 500);
     const lastRecordedQuery = useRef('');
-    const { mutate: recordSearchHistory } = useRecordSearchHistory();
+    const { mutate: recordSearchHistory, isReady: isSearchHistoryReady } = useRecordSearchHistory();
     const hasBrowseFilter = Boolean(genreQuery || parentIdQuery || collectionNameQuery);
+    const showSearchField = !hasBrowseFilter || Boolean(query);
 
     useEffect(() => {
         const normalizedQuery = debouncedQuery.trim();
-        if (normalizedQuery.length < 2 || normalizedQuery === lastRecordedQuery.current) {
+        if (!isSearchHistoryReady || normalizedQuery.length < 2 || normalizedQuery === lastRecordedQuery.current) {
             return;
         }
 
         lastRecordedQuery.current = normalizedQuery;
         recordSearchHistory(normalizedQuery);
-    }, [ debouncedQuery, recordSearchHistory ]);
+    }, [ debouncedQuery, isSearchHistoryReady, recordSearchHistory ]);
 
     useEffect(() => {
         const page = document.getElementById('searchPage');
@@ -71,7 +72,9 @@ const Search: FC = () => {
             title={globalize.translate('Search')}
             className='mainAnimatedPage libraryPage allLibraryPage noSecondaryNavPage'
         >
-            <SearchFields query={query} onSearch={setQuery} />
+            {showSearchField && (
+                <SearchFields query={query} onSearch={setQuery} />
+            )}
             {!debouncedQuery && !hasBrowseFilter ? (
                 <SearchSuggestions
                     parentId={parentIdQuery}

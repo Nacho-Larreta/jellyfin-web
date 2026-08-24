@@ -1,0 +1,9 @@
+$tv-safe-area-breakpoint: 100rem;
+
+@mixin content-inset-x($default-inset) {
+    --jf-page-content-inset-x: #{$default-inset};
+
+    @media (min-width: $tv-safe-area-breakpoint) {
+        --jf-page-content-inset-x: 5vw;
+    }
+}

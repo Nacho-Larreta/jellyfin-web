@@ -8,6 +8,7 @@ import { CardOptions } from 'types/cardOptions';
 import { LIVETV_CARD_OPTIONS } from '../constants/liveTvCardOptions';
 import { SEARCH_SECTIONS_SORT_ORDER } from '../constants/sectionSortOrder';
 import type { ApiClient } from 'jellyfin-apiclient';
+import globalize from 'lib/globalize';
 
 interface SearchImageOptions {
     fillWidth?: number;
@@ -206,25 +207,25 @@ export function getSearchItemInitials(item: BaseItemDto) {
 export function getSearchItemTypeLabel(item: BaseItemDto) {
     switch (item.Type) {
         case BaseItemKind.Movie:
-            return 'Película';
+            return globalize.translate('Movie');
         case BaseItemKind.Series:
-            return 'Series';
+            return globalize.translate('Series');
         case BaseItemKind.Episode:
-            return 'Episodio';
+            return globalize.translate('Episode');
         case BaseItemKind.Person:
-            return 'Persona';
+            return globalize.translate('Person');
         case BaseItemKind.MusicAlbum:
-            return 'Álbum';
+            return globalize.translate('Album');
         case BaseItemKind.Audio:
-            return 'Canción';
+            return globalize.translate('Song');
         case BaseItemKind.MusicArtist:
-            return 'Artista';
+            return globalize.translate('Artist');
         case BaseItemKind.BoxSet:
-            return 'Colección';
+            return globalize.translate('Collection');
         case BaseItemKind.TvChannel:
-            return 'Canal';
+            return globalize.translate('Channel');
         default:
-            return item.Type || 'Ítem';
+            return item.Type || globalize.translate('Item');
     }
 }
 

@@ -1,3 +1,5 @@
+@use '../../styles/page-insets' as pageInsets;
+
 .homeLibraryButton {
     min-width: 18%;
     margin: 0.5em !important;
@@ -33,6 +35,8 @@
 
 .tvHomeHero,
 .tvHomeDashboard {
+    @include pageInsets.content-inset-x(clamp(2rem, 3.9vw, 5rem));
+
     --jx-home-bg: #0b0b0b;
     --jx-home-surface: rgba(24, 24, 24, 0.88);
     --jx-home-surface-strong: rgba(34, 34, 34, 0.9);
@@ -48,7 +52,6 @@
     --jx-home-orange: #e87c03;
     --jx-home-font: "Figtree", "Netflix Sans", "Helvetica Neue", Arial, sans-serif;
     --jx-home-display: "Bebas Neue", "Netflix Sans", Impact, sans-serif;
-    --jx-home-page-x: clamp(2rem, 3.9vw, 5rem);
     --jx-home-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
 
     color: var(--jx-home-text);
@@ -65,7 +68,7 @@
     overflow: hidden;
     display: flex;
     align-items: center;
-    padding: clamp(6.4rem, 7vw, 7.6rem) var(--jx-home-page-x) clamp(6.8rem, 7.2vw, 8rem);
+    padding: clamp(6.4rem, 7vw, 7.6rem) var(--jf-page-content-inset-x) clamp(6.8rem, 7.2vw, 8rem);
     isolation: isolate;
     background:
         radial-gradient(circle at 75% 22%, rgba(0, 164, 220, 0.22), transparent 34%),
@@ -359,8 +362,21 @@
 }
 
 .tvHomeDashboard {
-    padding: 0 var(--jx-home-page-x) clamp(4rem, 7vw, 7rem);
+    padding: 0 var(--jf-page-content-inset-x) clamp(4rem, 7vw, 7rem);
     background: var(--jx-home-bg);
+}
+
+.homePage.homePage--withoutResumeHero {
+    padding-bottom: 0 !important;
+}
+
+.homePage.homePage--withoutResumeHero .pageTabContent {
+    padding-bottom: 0 !important;
+}
+
+.homePage .tvHomeDashboard--withoutResumeHero {
+    box-sizing: border-box;
+    min-height: calc(100vh - 5.5rem);
 }
 
 .homePage .tvHomeHero:not(.hide) + .tvHomeDashboard,
@@ -374,6 +390,32 @@
     display: flex;
     flex-direction: column;
     gap: clamp(2.35rem, 3.4vw, 3.65rem);
+}
+
+.tvHomeDashboard__loadState {
+    max-width: 42rem;
+    padding: clamp(1.25rem, 2vw, 2rem);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 0.85rem;
+    background: rgba(255, 255, 255, 0.055);
+    color: var(--jx-home-dim);
+}
+
+.tvHomeDashboard__loadState--partial {
+    border-color: rgba(255, 196, 87, 0.45);
+}
+
+.tvHomeDashboard__loadState--error {
+    border-color: rgba(229, 9, 20, 0.55);
+}
+
+.tvHomeDashboard__loadState h2 {
+    margin: 0 0 0.65rem;
+    color: #fff;
+}
+
+.tvHomeDashboard__loadState p {
+    margin: 0;
 }
 
 .tvHomeDashboard__section {
@@ -451,9 +493,9 @@
 .tvHomeDashboard__railViewport {
     position: relative;
     overflow: hidden;
-    margin-right: calc(var(--jx-home-page-x) * -1);
-    margin-left: calc(var(--jx-home-page-x) * -1);
-    padding: 0 var(--jx-home-page-x);
+    margin-right: calc(var(--jf-page-content-inset-x) * -1);
+    margin-left: calc(var(--jf-page-content-inset-x) * -1);
+    padding: 0 var(--jf-page-content-inset-x);
 }
 
 .tvHomeDashboard__railViewport::before,
@@ -485,7 +527,7 @@
     overflow-x: auto;
     overflow-y: hidden;
     padding: 0.15rem 0 0.7rem;
-    scroll-padding-inline: var(--jx-home-page-x);
+    scroll-padding-inline: var(--jf-page-content-inset-x);
     scroll-snap-type: x proximity;
     scrollbar-width: none;
 }
@@ -828,7 +870,7 @@
 @media all and (max-width: 60em) {
     .tvHomeHero,
     .tvHomeDashboard {
-        --jx-home-page-x: 1.15rem;
+        --jf-page-content-inset-x: 1.15rem;
     }
 
     .homePage .tvHomeHero {
