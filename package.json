@@ -111,7 +111,7 @@
     "history": "5.3.0",
     "hls.js": "1.6.15",
     "intersection-observer": "0.12.2",
-    "jellyfin-apiclient": "1.11.0",
+    "jellyfin-apiclient": "git+https://github.com/Nacho-Larreta/jellyfin-apiclient-javascript.git#cbd76662d5a72e939c938b1f47bbc56e4c63ff86",
     "jquery": "3.7.1",
     "jstree": "3.3.17",
     "libarchive.js": "2.0.2",
