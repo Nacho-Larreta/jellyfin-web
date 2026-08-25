@@ -6,6 +6,9 @@ node_modules
 # test coverage
 coverage
 
+# local component conformance fixtures
+.artifacts/
+
 # config
 config.json
 

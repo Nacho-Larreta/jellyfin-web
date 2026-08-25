@@ -23,7 +23,16 @@ export const WEB_SEMANTIC_TOKEN_MAPPING_MANIFEST = {
         'src/themes/utils.ts',
         'src/themes/_base/_semantic.scss'
     ],
-    implementedComponentIds: [],
+    implementedComponentIds: [
+        'atom.action',
+        'atom.avatar',
+        'atom.chip',
+        'atom.focus-indicator',
+        'atom.progress',
+        'atom.protection-scrim',
+        'molecule.media-card',
+        'molecule.modal-layer'
+    ],
     mappingVersion: '1.2.0',
     mutationCommand: 'npm run test:semantic-tokens:mutations',
     platform: 'web',

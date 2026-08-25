@@ -1,0 +1,356 @@
+:root {
+    --jf-component-focus-separator-width: calc(var(--jf-semantic-space-1) / 2);
+    --jf-component-focus-indicator-width: var(--jf-semantic-space-1);
+    --jf-component-control-target: calc(var(--jf-semantic-space-7) + var(--jf-semantic-space-1));
+}
+
+@mixin experience-interaction {
+    position: relative;
+    transition:
+        background-color var(--jf-semantic-motion-duration-fast) var(--jf-semantic-motion-easing-standard),
+        color var(--jf-semantic-motion-duration-fast) var(--jf-semantic-motion-easing-standard);
+
+    &::after {
+        position: absolute;
+        z-index: 1;
+        border-radius: inherit;
+        background: var(--jf-semantic-action-tertiary-container);
+        content: '';
+        inset: 0;
+        pointer-events: none;
+    }
+
+    &:hover::after {
+        background: var(--jf-semantic-interaction-hover-layer);
+    }
+
+    &:active::after {
+        background: var(--jf-semantic-interaction-pressed-layer);
+    }
+
+    &:focus-visible {
+        outline: var(--jf-component-focus-indicator-width) solid var(--jf-semantic-focus-indicator);
+        outline-offset: var(--jf-component-focus-separator-width);
+        box-shadow: 0 0 0 calc(var(--jf-component-focus-indicator-width) + var(--jf-component-focus-separator-width)) var(--jf-semantic-focus-separator);
+    }
+
+    &:disabled {
+        color: var(--jf-semantic-content-disabled);
+        cursor: not-allowed;
+    }
+}
+
+.experience-action {
+    @include experience-interaction;
+
+    min-block-size: var(--jf-component-control-target);
+    border-radius: var(--jf-semantic-shape-small);
+
+    &--primary {
+        background: var(--jf-semantic-action-primary-container);
+        color: var(--jf-semantic-action-primary-on-primary);
+    }
+
+    &--secondary {
+        background: var(--jf-semantic-action-secondary-container);
+        color: var(--jf-semantic-action-secondary-on-secondary);
+    }
+
+    &--tertiary {
+        background: var(--jf-semantic-action-tertiary-container);
+        color: var(--jf-semantic-action-tertiary-on-tertiary);
+    }
+
+    &--destructive {
+        background: var(--jf-semantic-action-destructive-container);
+        color: var(--jf-semantic-action-destructive-on-destructive);
+    }
+
+    &[aria-pressed='true'] {
+        background: var(--jf-semantic-state-selected-container);
+        color: var(--jf-semantic-state-selected-on-selected);
+    }
+}
+
+.experience-chip {
+    @include experience-interaction;
+
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-block-size: var(--jf-component-control-target);
+    border: var(--jf-component-focus-separator-width) solid var(--jf-semantic-border-strong);
+    border-radius: var(--jf-semantic-shape-full);
+    background: var(--jf-semantic-action-tertiary-container);
+    color: var(--jf-semantic-action-tertiary-on-tertiary);
+    cursor: pointer;
+    font: var(--jf-semantic-typography-label-medium);
+    gap: var(--jf-semantic-space-2);
+
+    &--small {
+        padding-inline: var(--jf-semantic-space-3);
+    }
+
+    &--medium {
+        padding-inline: var(--jf-semantic-space-4);
+    }
+
+    &--large {
+        padding-inline: var(--jf-semantic-space-5);
+    }
+
+    &[aria-pressed='true'] {
+        border-color: var(--jf-semantic-state-selected-container);
+        background: var(--jf-semantic-state-selected-container);
+        color: var(--jf-semantic-state-selected-on-selected);
+    }
+
+    &[data-availability='restricted'] {
+        border-color: var(--jf-semantic-state-restricted-container);
+    }
+
+    &__count {
+        color: var(--jf-semantic-content-secondary);
+        font: var(--jf-semantic-typography-metadata-small);
+    }
+}
+
+.experience-avatar {
+    position: relative;
+    display: inline-flex;
+    overflow: hidden;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    border-radius: var(--jf-semantic-shape-full);
+    background: var(--jf-semantic-state-selected-container);
+    color: var(--jf-semantic-state-selected-on-selected);
+
+    &--small {
+        block-size: var(--jf-semantic-space-6);
+        inline-size: var(--jf-semantic-space-6);
+    }
+
+    &--medium {
+        block-size: var(--jf-semantic-space-7);
+        inline-size: var(--jf-semantic-space-7);
+    }
+
+    &--large {
+        block-size: var(--jf-semantic-space-8);
+        inline-size: var(--jf-semantic-space-8);
+    }
+
+    &[data-availability='locked'] {
+        background: var(--jf-semantic-state-locked-container);
+        color: var(--jf-semantic-state-locked-on-locked);
+    }
+
+    &[data-availability='restricted'] {
+        background: var(--jf-semantic-state-restricted-container);
+        color: var(--jf-semantic-state-restricted-on-restricted);
+    }
+
+    &__image {
+        block-size: 100%;
+        inline-size: 100%;
+        object-fit: cover;
+    }
+
+    &__initials {
+        font: var(--jf-semantic-typography-label-large);
+    }
+}
+
+.experience-progress {
+    position: relative;
+    display: block;
+    overflow: hidden;
+    block-size: var(--jf-semantic-space-1);
+    border-radius: var(--jf-semantic-shape-full);
+    background: var(--jf-semantic-progress-track);
+    inline-size: 100%;
+
+    &__buffered,
+    &__played {
+        position: absolute;
+        block-size: 100%;
+        inset-block-start: 0;
+        inset-inline-start: 0;
+    }
+
+    &__buffered {
+        background: var(--jf-semantic-progress-buffered);
+        inline-size: var(--jf-component-progress-buffered);
+    }
+
+    &__played {
+        background: var(--jf-semantic-progress-played);
+        inline-size: var(--jf-component-progress-played);
+    }
+
+    &[data-state='loading'] &__buffered {
+        animation: experience-progress-loading var(--jf-semantic-motion-duration-slow) var(--jf-semantic-motion-easing-standard) infinite alternate;
+    }
+
+    &__error {
+        color: var(--jf-semantic-state-error-container);
+        font: var(--jf-semantic-typography-metadata-medium);
+    }
+}
+
+.experience-media-card {
+    min-inline-size: 0;
+    border-radius: var(--jf-semantic-shape-medium);
+    background: var(--jf-semantic-surface-raised);
+    color: var(--jf-semantic-content-primary);
+
+    &--placeholder {
+        display: grid;
+        min-block-size: calc(var(--jf-semantic-space-9) * 2);
+        place-items: center;
+        padding: var(--jf-semantic-space-4);
+        color: var(--jf-semantic-content-secondary);
+        font: var(--jf-semantic-typography-body-medium);
+    }
+
+    &[data-availability='error'] {
+        border: var(--jf-component-focus-separator-width) solid var(--jf-semantic-state-error-container);
+        color: var(--jf-semantic-state-error-on-error);
+    }
+
+    &__control {
+        @include experience-interaction;
+
+        display: grid;
+        inline-size: 100%;
+        min-block-size: var(--jf-component-control-target);
+        border: 0;
+        border-radius: inherit;
+        padding: 0;
+        background: var(--jf-semantic-action-tertiary-container);
+        color: inherit;
+        cursor: pointer;
+        text-align: start;
+    }
+
+    &__artwork {
+        position: relative;
+        display: grid;
+        min-block-size: calc(var(--jf-semantic-space-9) * 2);
+        place-items: center;
+        border-radius: var(--jf-semantic-shape-medium) var(--jf-semantic-shape-medium) 0 0;
+        background: var(--jf-semantic-surface-overlay);
+    }
+
+    &__body {
+        display: grid;
+        padding: var(--jf-semantic-space-3);
+        gap: var(--jf-semantic-space-1);
+    }
+
+    &__title {
+        font: var(--jf-semantic-typography-title-small);
+    }
+
+    &__subtitle {
+        color: var(--jf-semantic-content-secondary);
+        font: var(--jf-semantic-typography-metadata-medium);
+    }
+
+    &__badge {
+        position: absolute;
+        inset-block-start: var(--jf-semantic-space-2);
+        inset-inline-end: var(--jf-semantic-space-2);
+        border-radius: var(--jf-semantic-shape-small);
+        padding: var(--jf-semantic-space-1) var(--jf-semantic-space-2);
+        background: var(--jf-semantic-state-restricted-container);
+        color: var(--jf-semantic-state-restricted-on-restricted);
+        font: var(--jf-semantic-typography-label-small);
+
+        &--active {
+            inset-inline: var(--jf-semantic-space-2) auto;
+            background: var(--jf-semantic-state-active-container);
+            color: var(--jf-semantic-state-active-on-active);
+        }
+    }
+
+    &[data-availability='locked'] &__badge {
+        background: var(--jf-semantic-state-locked-container);
+        color: var(--jf-semantic-state-locked-on-locked);
+    }
+
+    &__control[aria-pressed='true'] {
+        box-shadow: inset 0 0 0 var(--jf-component-focus-indicator-width) var(--jf-semantic-state-selected-container);
+    }
+}
+
+.experience-overlay .MuiDialog-paper {
+    border-radius: var(--jf-semantic-shape-large);
+    background: var(--jf-semantic-surface-overlay);
+    color: var(--jf-semantic-content-primary);
+    box-shadow: var(--jf-semantic-elevation-3);
+}
+
+.experience-overlay .MuiBackdrop-root {
+    background: var(--jf-semantic-overlay-scrim);
+}
+
+.experience-fixture {
+    display: grid;
+    overflow-wrap: anywhere;
+    max-inline-size: 100%;
+    padding: var(--jf-semantic-space-5);
+    background: var(--jf-semantic-surface-canvas);
+    color: var(--jf-semantic-content-primary);
+    gap: var(--jf-semantic-space-5);
+
+    h1,
+    h2,
+    p {
+        margin: 0;
+    }
+
+    &__row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        margin-block-start: var(--jf-semantic-space-3);
+        gap: var(--jf-semantic-space-3);
+    }
+
+    &__grid {
+        display: grid;
+        margin-block-start: var(--jf-semantic-space-3);
+        grid-template-columns: repeat(auto-fit, minmax(min(100%, calc(var(--jf-semantic-space-9) * 3)), 1fr));
+        gap: var(--jf-semantic-space-3);
+    }
+
+    &__reflow-copy {
+        max-inline-size: 60ch;
+        font: var(--jf-semantic-typography-body-medium);
+    }
+}
+
+@keyframes experience-progress-loading {
+    from {
+        inline-size: var(--jf-semantic-space-8);
+    }
+
+    to {
+        inline-size: 100%;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .experience-action,
+    .experience-chip,
+    .experience-media-card__control {
+        transition-duration: var(--jf-semantic-motion-reduced-decorativeDuration);
+    }
+
+    .experience-progress[data-state='loading'] .experience-progress__buffered {
+        animation: none;
+        inline-size: 100%;
+    }
+}
