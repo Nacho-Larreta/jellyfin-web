@@ -21,6 +21,7 @@ import {
     updateProfileSelector
 } from '../../../../lib/profileSelector/api';
 import { getProfileAvatarColorClass } from '../../../../lib/profileSelector/colors';
+import { PROFILE_PIN_PATTERN, requestValidProfilePin } from '../../../../lib/profileSelector/pin';
 import { getProfileSelectorRoute } from '../../../../lib/profileSelector/utils';
 
 import '../profileSelector.scss';
@@ -139,17 +140,23 @@ function getManagedProfilesMarkup(apiClient, managedProfiles) {
 }
 
 async function promptForPin(profileName) {
-    return prompt({
-        title: globalize.translate('ProfileSelectorPinTitle', profileName || ''),
-        label: globalize.translate('LabelPasswordRecoveryPinCode'),
-        description: globalize.translate('ProfileSelectorPinDescription'),
-        confirmText: globalize.translate('ButtonOk'),
-        inputType: 'password',
-        inputMode: 'numeric',
-        autocomplete: 'off',
-        maxLength: 8,
-        pattern: '[0-9]*'
-    });
+    return requestValidProfilePin(
+        () => prompt({
+            title: globalize.translate('ProfileSelectorPinTitle', profileName || ''),
+            label: globalize.translate('LabelPasswordRecoveryPinCode'),
+            description: globalize.translate('ProfileSelectorPinDescription'),
+            confirmText: globalize.translate('ButtonOk'),
+            inputType: 'password',
+            inputMode: 'numeric',
+            autocomplete: 'off',
+            maxLength: 8,
+            pattern: PROFILE_PIN_PATTERN
+        }),
+        () => alert({
+            title: globalize.translate('HeaderError'),
+            text: globalize.translate('ProfileSelectorPinInvalid')
+        })
+    );
 }
 
 export default function(view) {
@@ -224,6 +231,10 @@ export default function(view) {
         try {
             pin = await promptForPin(profile.Name);
         } catch {
+            return;
+        }
+
+        if (pin === null) {
             return;
         }
 

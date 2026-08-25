@@ -1,4 +1,5 @@
 import { normalizeProfileSelectorState } from './utils';
+import { assertValidProfilePin } from './pin';
 
 export async function getCurrentProfileSelector(apiClient) {
     try {
@@ -39,11 +40,13 @@ export async function getSecondaryProfileUserIds(apiClient) {
 }
 
 export async function activateProfile(apiClient, profileUserId, pin) {
+    const hasPin = pin !== null && pin !== undefined;
+
     const response = await apiClient.ajax({
         type: 'POST',
         url: apiClient.getUrl(`ProfileSelectors/Current/Profiles/${profileUserId}/Activate`),
         contentType: 'application/json',
-        data: JSON.stringify(pin ? { Pin: pin } : {})
+        data: JSON.stringify(hasPin ? { Pin: assertValidProfilePin(pin) } : {})
     });
 
     return response.json();
@@ -79,7 +82,7 @@ export async function setProfilePin(apiClient, ownerUserId, profileUserId, pin) 
         type: 'POST',
         url: apiClient.getUrl(`Users/${ownerUserId}/ProfileSelector/Profiles/${profileUserId}/Pin`),
         contentType: 'application/json',
-        data: JSON.stringify({ Pin: pin })
+        data: JSON.stringify({ Pin: assertValidProfilePin(pin) })
     });
 }
 
@@ -89,9 +92,9 @@ export async function clearProfilePin(apiClient, ownerUserId, profileUserId, pin
         url: apiClient.getUrl(`Users/${ownerUserId}/ProfileSelector/Profiles/${profileUserId}/Pin`)
     };
 
-    if (pin) {
+    if (pin !== null && pin !== undefined) {
         request.contentType = 'application/json';
-        request.data = JSON.stringify({ Pin: pin });
+        request.data = JSON.stringify({ Pin: assertValidProfilePin(pin) });
     }
 
     await apiClient.ajax(request);

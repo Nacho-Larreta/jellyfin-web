@@ -1978,6 +1978,7 @@
     "ProfileSelectorKidsDescription": "Kids mode",
     "ProfileSelectorPinTitle": "Enter PIN for {0}",
     "ProfileSelectorPinDescription": "This profile is protected with a quick PIN.",
+    "ProfileSelectorPinInvalid": "Enter a PIN with 4 to 8 digits (0-9).",
     "ProfileSelectorAddProfileTitle": "Add profile",
     "ProfileSelectorAddProfileDescription": "Create another household profile.",
     "ProfileSelectorCreateTitle": "Create profile",

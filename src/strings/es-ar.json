@@ -1945,6 +1945,7 @@
     "ProfileSelectorKidsDescription": "Modo niños",
     "ProfileSelectorPinTitle": "Ingresá el PIN de {0}",
     "ProfileSelectorPinDescription": "Este perfil está protegido con un PIN rápido.",
+    "ProfileSelectorPinInvalid": "Ingresá un PIN de 4 a 8 dígitos (0-9).",
     "ProfileSelectorAddProfileTitle": "Agregar perfil",
     "ProfileSelectorAddProfileDescription": "Creá otro perfil para la casa.",
     "ProfileSelectorCreateTitle": "Crear perfil",
