@@ -9,6 +9,7 @@ const self = {};
 
 let lastMouseInputTime = new Date().getTime();
 let isMouseIdle;
+let pointerActivityOwner;
 
 function mouseIdleTime() {
     return new Date().getTime() - lastMouseInputTime;
@@ -53,6 +54,15 @@ export function hideCursor() {
 
 let lastPointerMoveData;
 function onPointerMove(e) {
+    if (pointerActivityOwner) {
+        const pointerType = e.pointerType || (layoutManager.mobile ? 'touch' : 'mouse');
+        if (pointerType !== 'touch' && pointerActivityOwner(e)) {
+            lastMouseInputTime = new Date().getTime();
+            notifyApp();
+        }
+        return;
+    }
+
     const eventX = e.screenX || e.clientX;
     const eventY = e.screenY || e.clientY;
 
@@ -115,7 +125,7 @@ function onMouseInterval() {
 
 let mouseInterval;
 function startMouseInterval() {
-    if (!mouseInterval) {
+    if (!mouseInterval && !pointerActivityOwner) {
         mouseInterval = setInterval(onMouseInterval, 5000);
     }
 }
@@ -165,8 +175,32 @@ initMouse();
 
 Events.on(layoutManager, 'modechange', initMouse);
 
+export function claimPointerActivity(owner) {
+    if (pointerActivityOwner) {
+        throw new Error('Pointer activity already has an owner');
+    }
+
+    pointerActivityOwner = owner;
+    lastPointerMoveData = undefined;
+    stopMouseInterval();
+    showCursor();
+
+    return () => {
+        if (pointerActivityOwner !== owner) return;
+
+        pointerActivityOwner = undefined;
+        lastPointerMoveData = undefined;
+        lastMouseInputTime = new Date().getTime();
+        showCursor();
+
+        if (!layoutManager.mobile) {
+            startMouseInterval();
+        }
+    };
+}
+
 export default {
+    claimPointerActivity,
     hideCursor,
     showCursor
 };
-

@@ -33,6 +33,7 @@ import LibraryMenu from '../../../scripts/libraryMenu';
 import { setBackdropTransparency, TRANSPARENCY_LEVEL } from '../../../components/backdrop/backdrop';
 import { pluginManager } from '../../../components/pluginManager';
 import { PluginType } from '../../../types/plugin.ts';
+import { PlayerPointerActivityController } from './pointerActivityController.ts';
 
 function getOpenedDialog() {
     return document.querySelector('.dialogContainer .dialog.opened');
@@ -273,18 +274,25 @@ export default function (view) {
 
     let mouseIsDown = false;
 
-    function showOsd(focusElement) {
+    function revealOsdPresentation(focusElement) {
         Events.trigger(document, EventType.SHOW_VIDEO_OSD, [ true ]);
         slideDownToShow(headerElement);
         showMainOsdControls(focusElement);
-        resetIdle();
     }
 
-    function hideOsd() {
+    function concealOsdPresentation() {
         Events.trigger(document, EventType.SHOW_VIDEO_OSD, [ false ]);
         slideUpToHide(headerElement);
         hideMainOsdControls();
         mouseManager.hideCursor();
+    }
+
+    function showOsd(focusElement) {
+        pointerActivityController.onControlsActivity(focusElement);
+    }
+
+    function hideOsd() {
+        pointerActivityController.conceal();
     }
 
     function toggleOsd() {
@@ -292,18 +300,6 @@ export default function (view) {
             hideOsd();
         } else if (!currentVisibleMenu) {
             showOsd();
-        }
-    }
-
-    function startOsdHideTimer() {
-        stopOsdHideTimer();
-        osdHideTimeout = setTimeout(hideOsd, 3e3);
-    }
-
-    function stopOsdHideTimer() {
-        if (osdHideTimeout) {
-            clearTimeout(osdHideTimeout);
-            osdHideTimeout = null;
         }
     }
 
@@ -379,36 +375,7 @@ export default function (view) {
     // TODO: Move all idle-related code to `inputManager` or `idleManager` or `idleHelper` (per dialog thing) and listen event from there.
 
     function resetIdle() {
-        // Restart hide timer if OSD is currently visible and there is no opened dialog
-        if (currentVisibleMenu && !mouseIsDown && !getOpenedDialog()) {
-            startOsdHideTimer();
-        } else {
-            stopOsdHideTimer();
-        }
-    }
-
-    function onPointerMove(e) {
-        if ((e.pointerType || (layoutManager.mobile ? 'touch' : 'mouse')) === 'mouse') {
-            const eventX = e.screenX || e.clientX || 0;
-            const eventY = e.screenY || e.clientY || 0;
-            const obj = lastPointerMoveData;
-
-            if (!obj) {
-                lastPointerMoveData = {
-                    x: eventX,
-                    y: eventY
-                };
-                return;
-            }
-
-            if (Math.abs(eventX - obj.x) < 10 && Math.abs(eventY - obj.y) < 10) {
-                return;
-            }
-
-            obj.x = eventX;
-            obj.y = eventY;
-            showOsd();
-        }
+        pointerActivityController.resetAutohideClock();
     }
 
     function onInputCommand(e) {
@@ -491,6 +458,7 @@ export default function (view) {
             return;
         }
 
+        pointerActivityController.onFullscreenChange();
         updateFullscreenIcon();
     }
 
@@ -1633,8 +1601,7 @@ export default function (view) {
     let enableProgressByTimeOfDay;
     let currentVisibleMenu;
     let statsOverlay;
-    let osdHideTimeout;
-    let lastPointerMoveData;
+    let releasePointerActivityOwnership;
     const self = this;
     let currentPlayerSupportedCommands = [];
     let currentRuntimeTicks = 0;
@@ -1657,6 +1624,12 @@ export default function (view) {
     const transitionEndEventName = dom.whichTransitionEvent();
     const headerElement = document.querySelector('.skinHeader');
     const osdBottomElement = view.querySelector('.videoOsdBottom-maincontrols');
+    const pointerActivityController = new PlayerPointerActivityController({
+        canAutohide: () => Boolean(currentVisibleMenu && !mouseIsDown && !getOpenedDialog()),
+        conceal: concealOsdPresentation,
+        reveal: revealOsdPresentation,
+        showCursor: mouseManager.showCursor
+    });
 
     nowPlayingPositionSlider.enableKeyboardDragging();
     nowPlayingVolumeSlider.enableKeyboardDragging();
@@ -1673,13 +1646,13 @@ export default function (view) {
     });
     view.addEventListener('viewshow', function () {
         try {
+            releasePointerActivityOwnership?.();
+            releasePointerActivityOwnership = mouseManager.claimPointerActivity(
+                (event) => pointerActivityController.onPointerMove(event)
+            );
+            pointerActivityController.start();
             Events.on(playbackManager, 'playerchange', onPlayerChange);
             bindToPlayer(playbackManager.getCurrentPlayer());
-            /* eslint-disable-next-line compat/compat */
-            dom.addEventListener(document, window.PointerEvent ? 'pointermove' : 'mousemove', onPointerMove, {
-                passive: true
-            });
-            showOsd();
             inputManager.on(window, onInputCommand);
             document.addEventListener('keydown', onKeyDown);
             dom.addEventListener(document, 'keydown', onKeyDownCapture, {
@@ -1757,13 +1730,11 @@ export default function (view) {
         if (browser.firefox || browser.edge) {
             dom.removeEventListener(document, 'click', onClickCapture, { capture: true });
         }
-        stopOsdHideTimer();
+        pointerActivityController.stop();
+        releasePointerActivityOwnership?.();
+        releasePointerActivityOwnership = undefined;
         headerElement.classList.remove('osdHeader');
         headerElement.classList.remove('osdHeader-hidden');
-        /* eslint-disable-next-line compat/compat */
-        dom.removeEventListener(document, window.PointerEvent ? 'pointermove' : 'mousemove', onPointerMove, {
-            passive: true
-        });
         inputManager.off(window, onInputCommand);
         Events.off(playbackManager, 'playerchange', onPlayerChange);
         releaseCurrentPlayer();
@@ -2072,4 +2043,3 @@ export default function (view) {
         });
     }
 }
-
