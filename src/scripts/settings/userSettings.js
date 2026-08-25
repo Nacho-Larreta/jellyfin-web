@@ -2,6 +2,7 @@ import Events from '../../utils/events.ts';
 import { toBoolean } from '../../utils/string.ts';
 import browser from '../browser';
 import appSettings from './appSettings';
+import { normalizeScreensaverAgeCeiling } from '../../plugins/backdropScreensaver/ScreensaverContentPolicy.ts';
 
 function onSaveTimeout() {
     const self = this;
@@ -455,6 +456,21 @@ export class UserSettings {
     }
 
     /**
+     * Get or set the device-local maximum age for backdrop screensaver content.
+     * @param {unknown} [val] - Supported age ceiling or explicit unlimited (-1).
+     * @return {number} Normalized age ceiling.
+     */
+    screensaverAgeCeiling(val) {
+        if (val !== undefined) {
+            const normalizedValue = normalizeScreensaverAgeCeiling(val);
+            this.set('screensaverAgeCeiling', normalizedValue.toString(), false);
+            return normalizedValue;
+        }
+
+        return normalizeScreensaverAgeCeiling(this.get('screensaverAgeCeiling', false));
+    }
+
+    /**
      * Get or set the interval between slides when using the slideshow.
      * @param {number|undefined} [val] - The interval between slides in seconds.
      * @return {number} The interval between slides in seconds.
@@ -706,6 +722,7 @@ export const skin = currentSettings.skin.bind(currentSettings);
 export const theme = currentSettings.theme.bind(currentSettings);
 export const screensaver = currentSettings.screensaver.bind(currentSettings);
 export const backdropScreensaverInterval = currentSettings.backdropScreensaverInterval.bind(currentSettings);
+export const screensaverAgeCeiling = currentSettings.screensaverAgeCeiling.bind(currentSettings);
 export const slideshowInterval = currentSettings.slideshowInterval.bind(currentSettings);
 export const screensaverTime = currentSettings.screensaverTime.bind(currentSettings);
 export const libraryPageSize = currentSettings.libraryPageSize.bind(currentSettings);

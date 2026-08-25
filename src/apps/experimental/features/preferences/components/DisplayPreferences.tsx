@@ -16,6 +16,7 @@ import { LayoutMode } from 'constants/layoutMode';
 import { useApi } from 'hooks/useApi';
 import { useThemes } from 'hooks/useThemes';
 import globalize from 'lib/globalize';
+import { SCREENSAVER_AGE_CEILINGS, type ScreensaverAgeCeiling } from 'plugins/backdropScreensaver/ScreensaverContentPolicy';
 
 import { useScreensavers } from '../hooks/useScreensavers';
 import type { DisplaySettingsValues } from '../types/displaySettingsValues';
@@ -23,6 +24,18 @@ import type { DisplaySettingsValues } from '../types/displaySettingsValues';
 interface DisplayPreferencesProps {
     onChange: (event: SelectChangeEvent | React.SyntheticEvent) => void;
     values: DisplaySettingsValues;
+}
+
+export function getScreensaverAgeCeilingLabel(ageCeiling: ScreensaverAgeCeiling) {
+    if (ageCeiling === 0) {
+        return globalize.translate('ScreensaverAgeCeilingGeneralAudiences');
+    }
+
+    if (ageCeiling === -1) {
+        return globalize.translate('ScreensaverAgeCeilingUnlimited');
+    }
+
+    return globalize.translate('ScreensaverAgeCeilingAge', ageCeiling);
 }
 
 export function DisplayPreferences({ onChange, values }: Readonly<DisplayPreferencesProps>) {
@@ -164,6 +177,31 @@ export function DisplayPreferences({ onChange, values }: Readonly<DisplayPrefere
                         />
                         <FormHelperText id='display-settings-screensaver-interval-description'>
                             {globalize.translate('LabelBackdropScreensaverIntervalHelp')}
+                        </FormHelperText>
+                    </FormControl>
+
+                    <FormControl fullWidth>
+                        <InputLabel id='display-settings-screensaver-age-ceiling-label'>
+                            {globalize.translate('LabelScreensaverAgeCeiling')}
+                        </InputLabel>
+                        <Select
+                            aria-describedby='display-settings-screensaver-age-ceiling-description'
+                            inputProps={{
+                                name: 'screensaverAgeCeiling'
+                            }}
+                            label={globalize.translate('LabelScreensaverAgeCeiling')}
+                            labelId='display-settings-screensaver-age-ceiling-label'
+                            onChange={onChange}
+                            value={values.screensaverAgeCeiling.toString()}
+                        >
+                            { SCREENSAVER_AGE_CEILINGS.map(ageCeiling => (
+                                <MenuItem key={ageCeiling} value={ageCeiling.toString()}>
+                                    {getScreensaverAgeCeilingLabel(ageCeiling)}
+                                </MenuItem>
+                            )) }
+                        </Select>
+                        <FormHelperText id='display-settings-screensaver-age-ceiling-description'>
+                            {globalize.translate('ScreensaverAgeCeilingHelp')}
                         </FormHelperText>
                     </FormControl>
                 </Fragment>

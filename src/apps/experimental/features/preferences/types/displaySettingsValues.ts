@@ -1,3 +1,5 @@
+import type { ScreensaverAgeCeiling } from 'plugins/backdropScreensaver/ScreensaverContentPolicy';
+
 export interface DisplaySettingsValues {
     customCss: string;
     dashboardTheme: string;
@@ -17,6 +19,7 @@ export interface DisplaySettingsValues {
     libraryPageSize: number;
     maxDaysForNextUp: number;
     screensaver: string;
+    screensaverAgeCeiling: ScreensaverAgeCeiling;
     screensaverInterval: number;
     slideshowInterval: number;
     theme: string;

@@ -8,6 +8,7 @@ import { AppFeature } from 'constants/appFeature';
 import { useApi } from 'hooks/useApi';
 import themeManager from 'scripts/themeManager';
 import { currentSettings, UserSettings } from 'scripts/settings/userSettings';
+import { normalizeScreensaverAgeCeiling } from 'plugins/backdropScreensaver/ScreensaverContentPolicy';
 
 import type { DisplaySettingsValues } from '../types/displaySettingsValues';
 import { useThemes } from 'hooks/useThemes';
@@ -102,6 +103,7 @@ async function loadDisplaySettings({
         libraryPageSize: settings.libraryPageSize(),
         maxDaysForNextUp: settings.maxDaysForNextUp(),
         screensaver: settings.screensaver() || 'none',
+        screensaverAgeCeiling: normalizeScreensaverAgeCeiling(settings.screensaverAgeCeiling()),
         screensaverInterval: settings.backdropScreensaverInterval(),
         slideshowInterval: settings.slideshowInterval(),
         theme: settings.theme() || defaultTheme?.id || FALLBACK_THEME_ID
@@ -146,6 +148,7 @@ async function saveDisplaySettings({
     userSettings.libraryPageSize(newDisplaySettings.libraryPageSize);
     userSettings.maxDaysForNextUp(newDisplaySettings.maxDaysForNextUp);
     userSettings.screensaver(normalizeValue(newDisplaySettings.screensaver));
+    userSettings.screensaverAgeCeiling(newDisplaySettings.screensaverAgeCeiling);
     userSettings.backdropScreensaverInterval(newDisplaySettings.screensaverInterval);
     userSettings.theme(newDisplaySettings.theme);
 
