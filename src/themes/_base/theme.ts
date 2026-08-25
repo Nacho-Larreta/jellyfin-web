@@ -1,6 +1,8 @@
 import type { ColorSystemOptions, ThemeOptions } from '@mui/material/styles';
 import type {} from '@mui/material/themeCssVarsAugmentation';
 
+import { SEMANTIC_SYSTEM_TOKENS } from '../semantic/systemTokens';
+
 const LIST_ICON_WIDTH = 36;
 
 /** The default "Dark" color scheme. */
@@ -34,6 +36,7 @@ export const DEFAULT_COLOR_SCHEME: ColorSystemOptions = {
 
 /** The default customizations to the default MUI theme. */
 export const DEFAULT_THEME_OPTIONS: ThemeOptions = {
+    semantic: SEMANTIC_SYSTEM_TOKENS,
     typography: {
         fontFamily: '"Figtree", "Netflix Sans", "Helvetica Neue", Arial, sans-serif',
         button: {

@@ -166,6 +166,7 @@
     "escheck": "es-check",
     "lint": "eslint",
     "test": "vitest --watch=false --config vite.config.ts",
+    "test:semantic-tokens:mutations": "node scripts/verify-semantic-token-mutations.mjs",
     "test:watch": "vitest --config vite.config.ts",
     "stylelint": "stylelint \"src/**/*.{css,scss}\""
   },

@@ -8,6 +8,17 @@ import light from './light';
 import purplehaze from './purplehaze';
 import wmc from './wmc';
 
+export const COLOR_SCHEMES = {
+    appletv,
+    blueradiance,
+    dark,
+    light,
+    purplehaze,
+    wmc
+} as const;
+
+export const COLOR_SCHEME_NAMES = Object.keys(COLOR_SCHEMES) as Array<keyof typeof COLOR_SCHEMES>;
+
 /** The default theme containing all color scheme variants. */
 const DEFAULT_THEME = createTheme({
     cssVariables: {
@@ -17,14 +28,7 @@ const DEFAULT_THEME = createTheme({
     },
     defaultColorScheme: 'dark',
     ...DEFAULT_THEME_OPTIONS,
-    colorSchemes: {
-        appletv,
-        blueradiance,
-        dark,
-        light,
-        purplehaze,
-        wmc
-    }
+    colorSchemes: COLOR_SCHEMES
 });
 
 export default DEFAULT_THEME;
