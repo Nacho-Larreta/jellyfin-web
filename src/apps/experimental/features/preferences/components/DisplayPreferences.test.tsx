@@ -1,8 +1,11 @@
 import { renderToStaticMarkup } from 'react-dom/server';
-import React from 'react';
+import { createRoot } from 'react-dom/client';
+import React, { act } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
+import BackdropScreensaver from 'plugins/backdropScreensaver/plugin';
 import { SCREENSAVER_AGE_CEILINGS } from 'plugins/backdropScreensaver/ScreensaverContentPolicy';
+import { UserSettings } from 'scripts/settings/userSettings';
 import type { DisplaySettingsValues } from '../types/displaySettingsValues';
 
 vi.mock('components/apphost', () => ({
@@ -23,6 +26,9 @@ vi.mock('lib/globalize', () => ({
     default: {
         translate: (key: string, value?: number) => value === undefined ? key : `${key}:${value}`
     }
+}));
+vi.mock('lib/jellyfin-apiclient', () => ({
+    ServerConnections: { currentApiClient: vi.fn() }
 }));
 
 import { DisplayPreferences, getScreensaverAgeCeilingLabel } from './DisplayPreferences';
@@ -89,5 +95,88 @@ describe('DisplayPreferences screensaver age ceiling', () => {
 
         expect(html).toContain('ScreensaverAgeCeilingAge:16');
         expect(html).toContain('value="16"');
+    });
+
+    it('persists an explicit selection for a recreated screensaver query', async () => {
+        Reflect.set(globalThis, [ 'IS', 'REACT', 'ACT', 'ENVIRONMENT' ].join('_'), true);
+        localStorage.removeItem('screensaverAgeCeiling');
+        const settings = new UserSettings();
+        const container = document.createElement('div');
+        document.body.append(container);
+        const root = createRoot(container);
+        const onAgeCeilingChange = vi.fn();
+
+        try {
+            await act(async () => root.render(
+                <DisplayPreferences
+                    onChange={onAgeCeilingChange}
+                    values={values(0)}
+                />
+            ));
+
+            const ageCeilingSelect = container.querySelector<HTMLElement>(
+                '[aria-labelledby^="display-settings-screensaver-age-ceiling-label"]'
+            );
+            expect(ageCeilingSelect).not.toBeNull();
+            if (!ageCeilingSelect) return;
+
+            await act(async () => {
+                ageCeilingSelect.dispatchEvent(new MouseEvent('mousedown', {
+                    bubbles: true,
+                    button: 0
+                }));
+            });
+            const ageSixteenOption = document.body.querySelector<HTMLElement>('[role="option"][data-value="16"]');
+            expect(ageSixteenOption).not.toBeNull();
+            if (!ageSixteenOption) return;
+
+            await act(async () => {
+                ageSixteenOption.dispatchEvent(new MouseEvent('click', {
+                    bubbles: true,
+                    button: 0
+                }));
+            });
+            expect(onAgeCeilingChange).toHaveBeenCalledOnce();
+            const selectedValue = onAgeCeilingChange.mock.calls[0][0].target.value;
+            settings.screensaverAgeCeiling(selectedValue);
+            expect(localStorage.getItem('screensaverAgeCeiling')).toBe('16');
+
+            const apiClient = {
+                getCurrentUserId: vi.fn(() => 'user-1'),
+                getItems: vi.fn(async () => ({ Items: [] })),
+                getParentalRatings: vi.fn(async () => [])
+            };
+            const fallback = {
+                hide: vi.fn(async () => undefined),
+                show: vi.fn()
+            };
+            const recreatedScreensaver = new BackdropScreensaver({
+                createFallback: () => fallback,
+                getApiClient: () => apiClient as never,
+                loadSlideshow: vi.fn()
+            });
+
+            await recreatedScreensaver.show();
+
+            expect(apiClient.getItems).toHaveBeenCalledWith('user-1', {
+                ImageTypes: 'Backdrop',
+                EnableImageTypes: 'Backdrop',
+                IncludeItemTypes: 'Movie,Series',
+                SortBy: 'Random',
+                Recursive: true,
+                Fields: 'Taglines,CustomRating',
+                ImageTypeLimit: 10,
+                HasParentalRating: true,
+                MaxOfficialRating: 16,
+                StartIndex: 0,
+                Limit: 200
+            });
+        } finally {
+            if (container.isConnected) {
+                await act(async () => root.unmount());
+            }
+            container.remove();
+            localStorage.removeItem('screensaverAgeCeiling');
+        }
     });
 });
