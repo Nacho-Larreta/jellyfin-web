@@ -16,10 +16,9 @@ function handleConnectionResult(page, result) {
                 const activeApiClient = ServerConnections.currentApiClient() || apiClient;
                 Dashboard.onServerChanged(activeApiClient.getCurrentUserId(), activeApiClient.accessToken(), activeApiClient);
                 Dashboard.navigate(targetUrl);
-            }).catch(err => {
-                console.warn('[addServer] unable to resolve profile selector route', err);
-                Dashboard.onServerChanged(apiClient.getCurrentUserId(), apiClient.accessToken(), apiClient);
-                Dashboard.navigate('home');
+            }).catch(() => {
+                console.warn('[addServer] unable to resolve profile selector route');
+                loading.show();
             });
             break;
         }

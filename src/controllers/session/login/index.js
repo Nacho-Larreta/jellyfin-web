@@ -27,11 +27,10 @@ const enableFocusTransform = !browser.slow && !browser.edge;
 
 function authenticateUserByName(page, apiClient, url, username, password) {
     loading.show();
-    apiClient.authenticateUserByName(username, password).then(function (result) {
-        const user = result.User;
+    apiClient.authenticateUserByName(username, password).then(function () {
         loading.hide();
 
-        onLoginSuccessful(user.Id, result.AccessToken, apiClient, url);
+        onLoginSuccessful(apiClient, url);
     }, function (response) {
         page.querySelector('#txtManualPassword').value = '';
         loading.hide();
@@ -81,8 +80,8 @@ function authenticateQuickConnect(apiClient, targetUrl) {
                     dialogHelper.close(dlg);
                 }
 
-                const result = await apiClient.quickConnect(data.Secret);
-                onLoginSuccessful(result.User.Id, result.AccessToken, apiClient, targetUrl);
+                await apiClient.quickConnect(data.Secret);
+                onLoginSuccessful(apiClient, targetUrl);
             }, function (e) {
                 clearInterval(interval);
 
@@ -113,15 +112,14 @@ function authenticateQuickConnect(apiClient, targetUrl) {
     });
 }
 
-function onLoginSuccessful(id, accessToken, apiClient, url) {
+function onLoginSuccessful(apiClient, url) {
     resolveProfileSelectorRoute(apiClient, url || '/home').then(targetUrl => {
         const activeApiClient = ServerConnections.currentApiClient() || apiClient;
         Dashboard.onServerChanged(activeApiClient.getCurrentUserId(), activeApiClient.accessToken(), activeApiClient);
         Dashboard.navigate(targetUrl);
-    }).catch(err => {
-        console.warn('[LoginPage] unable to resolve profile selector route', err);
-        Dashboard.onServerChanged(id, accessToken, apiClient);
-        Dashboard.navigate(url || 'home');
+    }).catch(() => {
+        console.warn('[LoginPage] unable to resolve profile selector route');
+        loading.show();
     });
 }
 

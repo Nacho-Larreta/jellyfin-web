@@ -84,13 +84,36 @@ const extractStorageEventEnvelope = (serialized, serverId) => {
     return server?.SessionSwitchEnvelope || null;
 };
 
+const API_CLIENT_SERVER_INFO_FIELDS = Object.freeze([
+    'Id',
+    'Name',
+    'LocalAddress',
+    'RemoteAddress',
+    'ManualAddress',
+    'LastConnectionMode',
+    'DateLastAccessed',
+    'Version',
+    'ProductName',
+    'OperatingSystem',
+    'StartupWizardCompleted',
+    'UserId'
+]);
+
+const createApiClientServerInfo = server => Object.fromEntries(
+    API_CLIENT_SERVER_INFO_FIELDS
+        .filter(field => server?.[field] !== undefined)
+        .map(field => [ field, server[field] ])
+);
+
 export class ServerConnections extends ConnectionManager {
     firstConnection = false;
 
     constructor() {
         super(...arguments);
         this.sessionCredentialProvider = arguments[0];
+        this.sessionDeviceId = arguments[4];
         this.sessionEnvelopeListeners = new Map();
+        this.stagedSessionBindings = new Map();
         this.localApiClient = null;
         this.firstConnection = null;
         this.mutateCredentials = mutation => this.mutateCredentialsWithAuthority(mutation);
@@ -184,7 +207,7 @@ export class ServerConnections extends ConnectionManager {
         console.debug('creating ApiClient singleton');
 
         const apiClient = new ApiClient(
-            server,
+            createApiClientServerInfo(server),
             appHost.appName(),
             appHost.appVersion(),
             appHost.deviceName(),
@@ -401,6 +424,31 @@ export class ServerConnections extends ConnectionManager {
         });
     }
 
+    clearResolvedSessionSwitchEnvelope(serverId, expectedRevision) {
+        return this.withSessionEnvelopeLock(serverId, async () => {
+            await this.beforeResolvedSessionEnvelopeClearSink();
+            const previousCredentials = this.readFreshCredentials();
+            const nextCredentials = JSON.parse(JSON.stringify(previousCredentials));
+            const server = nextCredentials.Servers.find(savedServer => savedServer.Id === serverId);
+            const envelope = server?.SessionSwitchEnvelope;
+            if (!server || !envelope) {
+                throw new ConcurrentSessionWriteError(0);
+            }
+
+            assertSessionEnvelope(envelope);
+            if (envelope.revision !== expectedRevision || envelope.marker !== null) {
+                throw new ConcurrentSessionWriteError(envelope.revision);
+            }
+
+            server.SessionSwitchEnvelope = null;
+            server.OwnerUserId = null;
+            server.OwnerAccessToken = null;
+            this.advanceSessionAuthorityRevision(server);
+            this.persistCredentials(previousCredentials, nextCredentials);
+            this.notifySessionSwitchEnvelope(serverId, null);
+        });
+    }
+
     subscribeSessionSwitchEnvelope(serverId, listener) {
         let listeners = this.sessionEnvelopeListeners.get(serverId);
         if (!listeners) {
@@ -431,6 +479,10 @@ export class ServerConnections extends ConnectionManager {
     getOwnerRecoverySession(serverId) {
         const envelope = this.getSessionSwitchEnvelope(serverId);
         return envelope?.recoverySession || null;
+    }
+
+    getSessionDeviceId() {
+        return this.sessionDeviceId;
     }
 
     async cacheOwnerSession(serverId, ownerUserId, ownerAccessToken) {
@@ -492,6 +544,10 @@ export class ServerConnections extends ConnectionManager {
         return Promise.resolve();
     }
 
+    beforeResolvedSessionEnvelopeClearSink() {
+        return Promise.resolve();
+    }
+
     assertSessionEnvelopeWriteWon(serverId, envelope, authorityRevision) {
         const storedCredentials = this.readFreshCredentials();
         const storedServer = storedCredentials.Servers.find(server => server.Id === serverId);
@@ -547,10 +603,17 @@ export class ServerConnections extends ConnectionManager {
             throw new Error('[ServerConnection] Invalid profile selector authentication result');
         }
 
+        if (this.getSessionSwitchEnvelope(serverId) !== null) {
+            throw new Error('[ServerConnection] Legacy profile activation is blocked by durable session authority');
+        }
+
         const server = await this.mutateCredentials(credentials => {
             const savedServer = credentials.Servers.find(candidate => candidate.Id === serverId);
             if (!savedServer) {
                 return null;
+            }
+            if (savedServer.SessionSwitchEnvelope) {
+                throw new Error('[ServerConnection] Legacy profile activation is blocked by durable session authority');
             }
             savedServer.UserId = authenticationResult.User.Id;
             savedServer.AccessToken = authenticationResult.AccessToken;
@@ -562,26 +625,143 @@ export class ServerConnections extends ConnectionManager {
             throw new Error(`[ServerConnection] Saved server not found: ${serverId}`);
         }
 
-        const apiClient = this.getOrCreateApiClient(serverId);
-        apiClient.closeWebSocket();
-        apiClient.serverInfo(server);
-        apiClient.setAuthenticationInfo(authenticationResult.AccessToken, authenticationResult.User.Id);
-        apiClient.ensureWebSocket();
-
-        this.setLocalApiClient(apiClient);
+        const apiClient = this.installAuthenticationBinding(
+            server,
+            authenticationResult.AccessToken,
+            authenticationResult.User.Id
+        );
 
         const user = {
             ...authenticationResult.User,
             ServerId: serverId
         };
 
-        await this.onLocalUserSignedIn(user);
+        await this.bootstrapAuthenticatedUser(user);
+        apiClient.ensureWebSocket();
+        await this.publishLocalUserState(user);
         Events.trigger(this, 'localusersignedin', [user]);
 
         return apiClient;
     }
 
-    onLocalUserSignedIn(user) {
+    installSessionAuthentication(session) {
+        if (!session?.serverId || !session?.profileUserId || !session?.credentialRef?.token) {
+            throw new TypeError('[ServerConnection] Invalid active profile session');
+        }
+
+        const server = this.readFreshCredentials().Servers.find(candidate => candidate.Id === session.serverId);
+        if (!server
+            || server.UserId !== session.profileUserId
+            || server.AccessToken !== session.credentialRef.token) {
+            throw new Error('[ServerConnection] Durable active session projection mismatch');
+        }
+
+        const current = this.getApiClient(session.serverId);
+        const alreadyInstalled = current?.accessToken?.() === session.credentialRef.token
+            && current?.getCurrentUserId?.() === session.profileUserId;
+        const apiClient = alreadyInstalled ?
+            current :
+            this.createIsolatedSessionApiClient(server, session);
+        this.stagedSessionBindings.set(session.serverId, {
+            apiClient,
+            isolated: !alreadyInstalled,
+            session
+        });
+    }
+
+    resetInstalledSession(serverId) {
+        const binding = this.getStagedSessionBinding(serverId);
+        if (binding.isolated) {
+            this.getApiClient(serverId)?.closeWebSocket();
+        }
+        binding.apiClient.closeWebSocket();
+    }
+
+    reconnectInstalledSession(serverId) {
+        this.getStagedSessionBinding(serverId).apiClient.ensureWebSocket();
+    }
+
+    getInstalledSessionUser(serverId) {
+        return this.getStagedSessionBinding(serverId).apiClient.getCurrentUser();
+    }
+
+    discardStagedSession(serverId) {
+        const binding = this.stagedSessionBindings.get(serverId);
+        if (binding?.isolated) {
+            binding.apiClient.closeWebSocket();
+            binding.apiClient.setAuthenticationInfo(null, null);
+        }
+        this.stagedSessionBindings.delete(serverId);
+    }
+
+    clearInstalledSession(serverId) {
+        this.discardStagedSession(serverId);
+        const apiClient = this.getApiClient(serverId);
+        if (!apiClient) return;
+
+        apiClient.closeWebSocket();
+        const server = this.readFreshCredentials().Servers.find(candidate => candidate.Id === serverId);
+        if (server) {
+            apiClient.serverInfo(createApiClientServerInfo(server));
+        }
+        apiClient.setAuthenticationInfo(null, null);
+    }
+
+    async publishSessionSwitchCompletion(user, receipt) {
+        if (!user?.Id || user.Id !== receipt?.profileUserId || !receipt.serverId) {
+            throw new Error('[ServerConnection] Session completion identity mismatch');
+        }
+
+        const binding = this.getStagedSessionBinding(receipt.serverId);
+        if (binding.session.profileUserId !== receipt.profileUserId
+            || binding.session.sessionEpoch !== receipt.sessionEpoch) {
+            throw new Error('[ServerConnection] Staged session completion mismatch');
+        }
+
+        if (binding.isolated) {
+            const server = this.readFreshCredentials().Servers.find(candidate => candidate.Id === receipt.serverId);
+            if (!server
+                || server.UserId !== binding.session.profileUserId
+                || server.AccessToken !== binding.session.credentialRef.token) {
+                throw new Error('[ServerConnection] Durable completion projection mismatch');
+            }
+
+            const activeApiClient = this.getApiClient(receipt.serverId);
+            if (!activeApiClient) {
+                throw new Error(`[ServerConnection] ApiClient not found: ${receipt.serverId}`);
+            }
+            activeApiClient.closeWebSocket();
+            activeApiClient.serverInfo(createApiClientServerInfo(server));
+            activeApiClient.setAuthenticationInfo(
+                binding.session.credentialRef.token,
+                binding.session.profileUserId
+            );
+            this.setLocalApiClient(activeApiClient);
+            activeApiClient.ensureWebSocket();
+        }
+
+        this.discardStagedSession(receipt.serverId);
+        await this.publishLocalUserState({ ...user, ServerId: receipt.serverId });
+        Events.trigger(this, 'sessionswitchcompleted', [receipt]);
+    }
+
+    async onLocalUserSignedIn(user) {
+        await this.bootstrapAuthenticatedUser(user);
+        return this.publishLocalUserState(user);
+    }
+
+    bootstrapAuthenticatedUser(user) {
+        const apiClient = this.getApiClient(user.ServerId);
+        if (!apiClient) {
+            return Promise.reject(new Error(`[ServerConnection] ApiClient not found: ${user.ServerId}`));
+        }
+
+        return import('../profileSelector/sessionSwitch/application').then(({ getWebSessionSwitchApplication }) => {
+            return getWebSessionSwitchApplication(this).bootstrapAuthenticatedSession(apiClient, user);
+        });
+    }
+
+    publishLocalUserState(user) {
         const apiClient = this.getApiClient(user.ServerId);
         this.setLocalApiClient(apiClient);
         return setUserInfo(user.Id, apiClient).then(() => {
@@ -590,6 +770,39 @@ export class ServerConnections extends ConnectionManager {
             }
             return Promise.resolve();
         });
+    }
+
+    installAuthenticationBinding(server, accessToken, userId) {
+        const apiClient = this.getOrCreateApiClient(server.Id);
+        apiClient.closeWebSocket();
+        apiClient.serverInfo(createApiClientServerInfo(server));
+        apiClient.setAuthenticationInfo(accessToken, userId);
+        this.setLocalApiClient(apiClient);
+        return apiClient;
+    }
+
+    createIsolatedSessionApiClient(server, session) {
+        const serverInfo = createApiClientServerInfo(server);
+        const apiClient = new ApiClient(
+            serverInfo,
+            appHost.appName(),
+            appHost.appVersion(),
+            appHost.deviceName(),
+            appHost.deviceId()
+        );
+        apiClient.enableAutomaticNetworking = false;
+        apiClient.manualAddressOnly = true;
+        apiClient.serverInfo(serverInfo);
+        apiClient.setAuthenticationInfo(session.credentialRef.token, session.profileUserId);
+        return apiClient;
+    }
+
+    getStagedSessionBinding(serverId) {
+        const binding = this.stagedSessionBindings.get(serverId);
+        if (!binding) {
+            throw new Error(`[ServerConnection] Staged session not found: ${serverId}`);
+        }
+        return binding;
     }
 }
 

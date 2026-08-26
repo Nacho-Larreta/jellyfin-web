@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
-const { ajaxMock } = vi.hoisted(() => ({ ajaxMock: vi.fn() }));
+const { ajaxMock, constructedApiClients } = vi.hoisted(() => ({
+    ajaxMock: vi.fn(),
+    constructedApiClients: []
+}));
 
 vi.mock('components/apphost', () => ({
     appHost: {
@@ -24,7 +27,22 @@ vi.mock('utils/jellyfin-apiclient/compat', () => ({
 }));
 vi.mock('utils/fetch', () => ({ ajax: ajaxMock }));
 vi.mock('jellyfin-apiclient', () => ({
-    ApiClient: class {},
+    ApiClient: class {
+        constructor(...args) {
+            this.constructorArgs = args;
+            constructedApiClients.push(this);
+        }
+        accessToken = vi.fn(() => this.authenticationToken ?? null);
+        closeWebSocket = vi.fn();
+        ensureWebSocket = vi.fn();
+        getCurrentUser = vi.fn();
+        getCurrentUserId = vi.fn(() => this.authenticationUserId ?? null);
+        serverInfo = vi.fn();
+        setAuthenticationInfo = vi.fn((token, userId) => {
+            this.authenticationToken = token;
+            this.authenticationUserId = userId;
+        });
+    },
     Credentials: class {
         key = 'default-test-credentials';
         value = { Servers: [] };
@@ -36,6 +54,7 @@ vi.mock('jellyfin-apiclient', () => ({
 }));
 
 import {
+    ConcurrentSessionWriteError,
     SessionStorageCorruptionError,
     SessionSwitchUnsupportedEngineError,
     createActiveProfileSession,
@@ -49,6 +68,7 @@ import {
 import { ServerConnections } from './ServerConnections';
 import { ConnectionState } from './connectionState';
 import { revokeSavedSessionAuthority } from './connectionManager';
+import Events from 'utils/events.ts';
 
 function createEnvelope(targetUser = 'target-user', targetToken = 'target-token') {
     const initial = createSessionSwitchEnvelope(
@@ -59,6 +79,31 @@ function createEnvelope(targetUser = 'target-user', targetToken = 'target-token'
         ...initial,
         revision: 1,
         activeSession: createActiveProfileSession('server-1', 'device-1', targetUser, targetToken, 8)
+    };
+}
+
+function createPendingEnvelope(revision = 1) {
+    const initial = createSessionSwitchEnvelope(
+        createActiveProfileSession('server-1', 'device-1', 'old-user', 'old-token', 7),
+        createOwnerRecoverySession('server-1', 'device-1', 'owner-user', 'owner-token')
+    );
+    return {
+        ...initial,
+        revision,
+        marker: {
+            kind: 'PendingSwitch',
+            phase: 'Preparing',
+            switchId: 'switch-1',
+            serverId: 'server-1',
+            deviceId: 'device-1',
+            oldProfileUserId: 'old-user',
+            oldEpoch: 7,
+            targetProfileUserId: 'target-user',
+            coordinatorId: 'coordinator-1',
+            fencingToken: 1,
+            leaseExpiresAtMs: 1_000,
+            updatedAtMs: 10
+        }
     };
 }
 
@@ -648,5 +693,176 @@ describe('ServerConnections session envelope adapter', () => {
 
         expect(provider.state().Servers).toEqual([]);
         expect(observed).toHaveBeenCalledWith(null);
+    });
+
+    it('makes selector-disabled cleanup conditional on the exact resolved revision', async () => {
+        const provider = createProvider();
+        const connections = createConnections(provider);
+        const pending = createPendingEnvelope();
+
+        await connections.replaceSessionSwitchEnvelope('server-1', 0, pending);
+        await expect(connections.clearResolvedSessionSwitchEnvelope('server-1', 1))
+            .rejects.toBeInstanceOf(ConcurrentSessionWriteError);
+
+        expect(provider.state().Servers[0].SessionSwitchEnvelope).toEqual(pending);
+        expect(provider.state().Servers[0].OwnerAccessToken).toBe('owner-token');
+    });
+
+    it('preserves a marker that wins the credential lock before selector-disabled cleanup', async () => {
+        const storage = createStorage();
+        const providerA = createProvider({}, storage);
+        const providerB = createProvider({}, storage);
+        const lockManager = createLockManager();
+        const connectionsA = createConnections(providerA, lockManager);
+        const connectionsB = createConnections(providerB, lockManager);
+        const pending = createPendingEnvelope();
+
+        const markerWrite = connectionsA.replaceSessionSwitchEnvelope('server-1', 0, pending);
+        const staleCleanup = connectionsB.clearResolvedSessionSwitchEnvelope('server-1', 0);
+
+        await markerWrite;
+        await expect(staleCleanup).rejects.toBeInstanceOf(ConcurrentSessionWriteError);
+        expect(JSON.parse(storage.peek(providerA.key)).Servers[0].SessionSwitchEnvelope).toEqual(pending);
+    });
+
+    it('keeps staged target authentication isolated and passes only allowlisted server DTO data', async () => {
+        const provider = createProvider({
+            UserId: 'target-user',
+            AccessToken: 'target-token',
+            SessionSwitchEnvelope: createEnvelope()
+        });
+        const connections = createConnections(provider);
+        const oldApiClient = {
+            accessToken: () => 'old-token',
+            closeWebSocket: vi.fn(),
+            ensureWebSocket: vi.fn(),
+            getCurrentUserId: () => 'old-user',
+            serverInfo: vi.fn(),
+            setAuthenticationInfo: vi.fn()
+        };
+        connections._apiClients = [ oldApiClient ];
+        connections.getApiClient = vi.fn(() => oldApiClient);
+        connections.setLocalApiClient(oldApiClient);
+        const constructionCount = constructedApiClients.length;
+        const targetSession = createActiveProfileSession(
+            'server-1',
+            'device-1',
+            'target-user',
+            'target-token',
+            8
+        );
+
+        connections.installSessionAuthentication(targetSession);
+        const isolatedApiClient = constructedApiClients[constructionCount];
+        isolatedApiClient.getCurrentUser.mockResolvedValue({ Id: 'target-user' });
+
+        expect(provider.writes).toHaveLength(0);
+        expect(connections._apiClients).toEqual([ oldApiClient ]);
+        expect(connections.getLocalApiClient()).toBe(oldApiClient);
+        expect(window.ApiClient).toBe(oldApiClient);
+        expect(oldApiClient.closeWebSocket).not.toHaveBeenCalled();
+        expect(oldApiClient.setAuthenticationInfo).not.toHaveBeenCalled();
+        expect(await connections.getInstalledSessionUser('server-1')).toEqual({ Id: 'target-user' });
+
+        const serverDto = isolatedApiClient.constructorArgs[0];
+        expect(serverDto).toEqual(expect.objectContaining({
+            Id: 'server-1',
+            UserId: 'target-user'
+        }));
+        expect(JSON.stringify(serverDto)).not.toMatch(
+            /AccessToken|OwnerAccessToken|SessionSwitchEnvelope|owner-token|target-token|recoverySession/
+        );
+
+        connections.reconnectInstalledSession('server-1');
+        expect(isolatedApiClient.ensureWebSocket).toHaveBeenCalledOnce();
+        expect(oldApiClient.setAuthenticationInfo).not.toHaveBeenCalled();
+
+        connections.publishLocalUserState = vi.fn().mockResolvedValue(undefined);
+        await connections.publishSessionSwitchCompletion(
+            { Id: 'target-user' },
+            {
+                switchId: 'switch-1',
+                serverId: 'server-1',
+                profileUserId: 'target-user',
+                sessionEpoch: 8
+            }
+        );
+        expect(oldApiClient.setAuthenticationInfo).toHaveBeenCalledWith('target-token', 'target-user');
+        expect(JSON.stringify(oldApiClient.serverInfo.mock.lastCall[0])).not.toMatch(
+            /AccessToken|OwnerAccessToken|SessionSwitchEnvelope|owner-token|target-token|recoverySession/
+        );
+        expect(connections.getLocalApiClient()).toBe(oldApiClient);
+        expect(connections._apiClients).toEqual([ oldApiClient ]);
+    });
+
+    it('finishes bootstrap before publishing user state to inherited authentication listeners', async () => {
+        const connections = createConnections(createProvider());
+        const events = [];
+        connections.bootstrapAuthenticatedUser = vi.fn(async () => {
+            events.push('bootstrap');
+        });
+        connections.publishLocalUserState = vi.fn(async () => {
+            events.push('publish');
+        });
+
+        await connections.onLocalUserSignedIn({ Id: 'old-user', ServerId: 'server-1' });
+
+        expect(events).toEqual([ 'bootstrap', 'publish' ]);
+    });
+
+    it('fails legacy target activation without mutating an existing durable owner envelope', async () => {
+        const provider = createProvider();
+        const connections = createConnections(provider);
+        const before = provider.state();
+
+        await expect(connections.applyAuthenticationResult('server-1', {
+            AccessToken: 'legacy-target-token',
+            User: { Id: 'legacy-target-user' }
+        })).rejects.toThrow('Legacy profile activation is blocked');
+
+        expect(provider.state()).toEqual(before);
+        expect(provider.writes).toHaveLength(0);
+        expect(connections.getActiveProfileSession('server-1')).toEqual(
+            before.Servers[0].SessionSwitchEnvelope.activeSession
+        );
+    });
+
+    it('publishes switch completion without emitting an early ordinary sign-in event', async () => {
+        const connections = createConnections(createProvider());
+        const activeApiClient = {
+            accessToken: () => 'old-token',
+            closeWebSocket: vi.fn(),
+            ensureWebSocket: vi.fn(),
+            getCurrentUserId: () => 'old-user',
+            serverInfo: vi.fn(),
+            setAuthenticationInfo: vi.fn()
+        };
+        connections.getApiClient = vi.fn(() => activeApiClient);
+        connections.installSessionAuthentication(
+            createActiveProfileSession('server-1', 'device-1', 'old-user', 'old-token', 7)
+        );
+        connections.publishLocalUserState = vi.fn().mockResolvedValue(undefined);
+        const signedIn = vi.fn();
+        const completed = vi.fn();
+        Events.on(connections, 'localusersignedin', signedIn);
+        Events.on(connections, 'sessionswitchcompleted', completed);
+        const receipt = {
+            switchId: 'switch-1',
+            serverId: 'server-1',
+            profileUserId: 'old-user',
+            sessionEpoch: 7
+        };
+
+        await connections.publishSessionSwitchCompletion(
+            { Id: 'old-user' },
+            receipt
+        );
+
+        expect(connections.publishLocalUserState).toHaveBeenCalledWith({
+            Id: 'old-user',
+            ServerId: 'server-1'
+        });
+        expect(completed).toHaveBeenCalledWith(expect.anything(), receipt);
+        expect(signedIn).not.toHaveBeenCalled();
     });
 });

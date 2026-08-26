@@ -1,6 +1,7 @@
 import { ServerConnections } from 'lib/jellyfin-apiclient';
 
-import { activateProfile, getCurrentProfileSelector } from './api';
+import { activateProfile } from './api';
+import { getWebSessionSwitchApplication } from './sessionSwitch/application';
 import { clearUnlockedProfileUserId, getUnlockedProfileUserId } from './session';
 import { getAutoActivationCandidate, getProfileSelectorRoute, isProfileSelectionRequired } from './utils';
 
@@ -11,15 +12,11 @@ async function autoActivateProfile(apiClient, candidate) {
 }
 
 export async function resolveProfileSelectorRoute(apiClient, targetUrl = '/home') {
-    const selector = await getCurrentProfileSelector(apiClient);
-
-    ServerConnections.setProfileSelectorAvailability(apiClient.serverId(), !!selector?.IsEnabled);
+    const { selector } = await getWebSessionSwitchApplication(ServerConnections)
+        .prepareProtectedRoute(apiClient);
     if (!selector?.IsEnabled) {
+        clearUnlockedProfileUserId(apiClient.serverId());
         return targetUrl;
-    }
-
-    if (selector.IsCurrentUserOwner) {
-        ServerConnections.cacheOwnerSession(apiClient.serverId(), selector.OwnerUserId, apiClient.accessToken());
     }
 
     const unlockedProfileUserId = getUnlockedProfileUserId(apiClient.serverId());
