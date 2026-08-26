@@ -7,7 +7,16 @@ import Dashboard from 'utils/dashboard';
 import Events from 'utils/events.ts';
 import { toApi } from 'utils/jellyfin-apiclient/compat';
 
-import ConnectionManager from './connectionManager';
+import {
+    CORRUPT_SESSION_STORAGE,
+    ConcurrentSessionWriteError,
+    SessionStorageCorruptionError,
+    SessionSwitchUnsupportedEngineError,
+    assertSessionEnvelope,
+    createOwnerRecoverySession
+} from '../profileSelector/sessionSwitch/model';
+
+import ConnectionManager, { revokeSavedSessionAuthority } from './connectionManager';
 
 const normalizeImageOptions = options => {
     if (!options.quality && (options.maxWidth || options.width || options.maxHeight || options.height || options.fillWidth || options.fillHeight)) {
@@ -29,18 +38,136 @@ const getMaxBandwidth = () => {
     return null;
 };
 
-class ServerConnections extends ConnectionManager {
+const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+
+const parseStoredCredentials = serialized => {
+    let credentials;
+    try {
+        credentials = JSON.parse(serialized);
+    } catch {
+        throw new SessionStorageCorruptionError();
+    }
+
+    if (!isRecord(credentials) || !Array.isArray(credentials.Servers)
+        || credentials.Servers.some(server => !isRecord(server))) {
+        throw new SessionStorageCorruptionError();
+    }
+
+    return credentials;
+};
+
+const readSessionAuthorityRevision = server => {
+    const revision = server?.SessionSwitchAuthorityRevision ?? 0;
+    if (!Number.isSafeInteger(revision) || revision < 0) {
+        throw new SessionStorageCorruptionError();
+    }
+    return revision;
+};
+
+const sessionAuthorityProjection = server => JSON.stringify({
+    AccessToken: server?.AccessToken ?? null,
+    ExchangeToken: server?.ExchangeToken ?? null,
+    OwnerAccessToken: server?.OwnerAccessToken ?? null,
+    OwnerUserId: server?.OwnerUserId ?? null,
+    SessionSwitchEnvelope: server?.SessionSwitchEnvelope ?? null,
+    UserId: server?.UserId ?? null
+});
+
+const extractStorageEventEnvelope = (serialized, serverId) => {
+    if (serialized === null) {
+        return null;
+    }
+
+    const credentials = parseStoredCredentials(serialized);
+    const server = credentials.Servers.find(savedServer => savedServer.Id === serverId);
+    readSessionAuthorityRevision(server);
+    return server?.SessionSwitchEnvelope || null;
+};
+
+export class ServerConnections extends ConnectionManager {
     firstConnection = false;
 
     constructor() {
         super(...arguments);
+        this.sessionCredentialProvider = arguments[0];
+        this.sessionEnvelopeListeners = new Map();
         this.localApiClient = null;
         this.firstConnection = null;
+        this.mutateCredentials = mutation => this.mutateCredentialsWithAuthority(mutation);
+
+        this.deleteServer = async serverId => {
+            if (!serverId) {
+                throw new Error('null serverId');
+            }
+
+            return this.withSessionEnvelopeLock(serverId, () => {
+                const previousCredentials = this.readFreshCredentials();
+                const nextCredentials = JSON.parse(JSON.stringify(previousCredentials));
+                const previousLength = nextCredentials.Servers.length;
+                nextCredentials.Servers = nextCredentials.Servers.filter(server => server.Id !== serverId);
+                if (nextCredentials.Servers.length === previousLength) {
+                    return;
+                }
+
+                this.persistCredentials(previousCredentials, nextCredentials);
+                this.notifySessionSwitchEnvelope(serverId, null);
+            });
+        };
+
+        this.logout = async () => {
+            const signedOutServers = await Promise.all(this._apiClients
+                .filter(apiClient => apiClient.accessToken?.())
+                .map(async apiClient => {
+                    const serverId = apiClient.serverInfo?.()?.Id;
+                    try {
+                        await apiClient.logout();
+                    } catch {
+                        // Local authority is revoked even when remote logout is unavailable.
+                    }
+                    return serverId;
+                }));
+
+            await this.withSessionEnvelopeLock('logout', () => {
+                const previousCredentials = this.readFreshCredentials();
+                const nextCredentials = JSON.parse(JSON.stringify(previousCredentials));
+                const revokedServerIds = [];
+                nextCredentials.Servers
+                    .filter(server => server.UserLinkType !== 'Guest')
+                    .forEach(server => {
+                        revokeSavedSessionAuthority(server);
+                        this.advanceSessionAuthorityRevision(server);
+                        revokedServerIds.push(server.Id);
+                    });
+                this.persistCredentials(previousCredentials, nextCredentials);
+                revokedServerIds.forEach(serverId => {
+                    this.notifySessionSwitchEnvelope(serverId, null);
+                });
+            });
+
+            signedOutServers.filter(Boolean).forEach(serverId => {
+                Events.trigger(this, 'localusersignedout', [{ serverId }]);
+            });
+        };
+
+        window.addEventListener('storage', event => {
+            if (event.key !== this.sessionCredentialProvider.key) {
+                return;
+            }
+
+            this.sessionEnvelopeListeners.forEach((_listeners, serverId) => {
+                try {
+                    this.notifySessionSwitchEnvelope(
+                        serverId,
+                        extractStorageEventEnvelope(event.newValue, serverId)
+                    );
+                } catch {
+                    this.notifySessionSwitchEnvelope(serverId, CORRUPT_SESSION_STORAGE);
+                }
+            });
+        });
 
         Events.on(this, 'localusersignedout', (_e, logoutInfo) => {
             setUserInfo(null, null);
-            // Ensure the updated credentials are persisted to storage
-            credentialProvider.credentials(credentialProvider.credentials());
 
             if (window.NativeShell && typeof window.NativeShell.onLocalUserSignedOut === 'function') {
                 window.NativeShell.onLocalUserSignedOut(logoutInfo);
@@ -137,40 +264,280 @@ class ServerConnections extends ConnectionManager {
     }
 
     getSavedServer(serverId) {
-        return credentialProvider.credentials().Servers.find(server => server.Id === serverId) || null;
+        return this.sessionCredentialProvider.credentials().Servers.find(server => server.Id === serverId) || null;
     }
 
-    updateSavedServer(serverId, updater) {
-        const credentials = credentialProvider.credentials();
-        const server = credentials.Servers.find(savedServer => savedServer.Id === serverId);
+    updateSavedServer(serverId, updater, options = {}) {
+        return this.withSessionEnvelopeLock(serverId, () => {
+            const previousCredentials = this.readFreshCredentials();
+            const nextCredentials = JSON.parse(JSON.stringify(previousCredentials));
+            const server = nextCredentials.Servers.find(savedServer => savedServer.Id === serverId);
+            if (!server) {
+                return null;
+            }
 
-        if (!server) {
+            updater(server);
+            if (options.advanceSessionAuthority) {
+                this.advanceSessionAuthorityRevision(server);
+            }
+            this.persistCredentials(previousCredentials, nextCredentials);
+            if (options.notifySessionEnvelope) {
+                this.notifySessionSwitchEnvelope(serverId, server.SessionSwitchEnvelope || null);
+            }
+            return JSON.parse(JSON.stringify(server));
+        });
+    }
+
+    mutateCredentialsWithAuthority(mutation) {
+        return this.withSessionEnvelopeLock('credentials', () => {
+            const previousCredentials = this.readFreshCredentials();
+            const nextCredentials = JSON.parse(JSON.stringify(previousCredentials));
+            const result = mutation(nextCredentials);
+            const changedEnvelopes = [];
+
+            nextCredentials.Servers.forEach(server => {
+                const previousServer = previousCredentials.Servers.find(candidate => candidate.Id === server.Id);
+                if (sessionAuthorityProjection(previousServer) === sessionAuthorityProjection(server)) {
+                    return;
+                }
+
+                const previousRevision = readSessionAuthorityRevision(previousServer);
+                const currentRevision = readSessionAuthorityRevision(server);
+                if (currentRevision <= previousRevision) {
+                    if (previousRevision === Number.MAX_SAFE_INTEGER) {
+                        throw new SessionStorageCorruptionError();
+                    }
+                    server.SessionSwitchAuthorityRevision = previousRevision + 1;
+                }
+                changedEnvelopes.push([ server.Id, server.SessionSwitchEnvelope || null ]);
+            });
+
+            previousCredentials.Servers.forEach(previousServer => {
+                if (!nextCredentials.Servers.some(server => server.Id === previousServer.Id)) {
+                    changedEnvelopes.push([ previousServer.Id, null ]);
+                }
+            });
+
+            this.persistCredentials(previousCredentials, nextCredentials);
+            changedEnvelopes.forEach(([ serverId, envelope ]) => {
+                this.notifySessionSwitchEnvelope(serverId, envelope);
+            });
+            return result;
+        });
+    }
+
+    getSessionSwitchEnvelope(serverId) {
+        const server = this.readFreshCredentials().Servers.find(savedServer => savedServer.Id === serverId);
+        readSessionAuthorityRevision(server);
+        const envelope = server?.SessionSwitchEnvelope;
+        if (!envelope) {
             return null;
         }
 
-        updater(server);
-        credentialProvider.credentials(credentials);
-
-        return server;
+        const durableEnvelope = JSON.parse(JSON.stringify(envelope));
+        assertSessionEnvelope(durableEnvelope);
+        return durableEnvelope;
     }
 
-    cacheOwnerSession(serverId, ownerUserId, ownerAccessToken) {
+    async replaceSessionSwitchEnvelope(serverId, expectedRevision, envelope) {
+        assertSessionEnvelope(envelope);
+        if (envelope.activeSession.serverId !== serverId) {
+            throw new TypeError('[ServerConnection] Session envelope server mismatch');
+        }
+
+        if (envelope.revision !== expectedRevision + 1) {
+            throw new TypeError('[ServerConnection] Session envelope revision must advance exactly once');
+        }
+
+        const expectedAuthorityRevision = this.getSessionAuthorityRevision(
+            this.readFreshCredentials().Servers.find(server => server.Id === serverId)
+        );
+
+        return this.withSessionEnvelopeLock(serverId, async () => {
+            await this.beforeSessionEnvelopeSink();
+            const durableEnvelope = JSON.parse(JSON.stringify(envelope));
+            const previousCredentials = this.readFreshCredentials();
+            const nextCredentials = JSON.parse(JSON.stringify(previousCredentials));
+            const server = nextCredentials.Servers.find(savedServer => savedServer.Id === serverId);
+            if (!server) {
+                throw new Error(`[ServerConnection] Saved server not found: ${serverId}`);
+            }
+
+            if (this.getSessionAuthorityRevision(server) !== expectedAuthorityRevision) {
+                throw new ConcurrentSessionWriteError(server.SessionSwitchEnvelope?.revision ?? 0);
+            }
+
+            if (server.SessionSwitchEnvelope) {
+                assertSessionEnvelope(server.SessionSwitchEnvelope);
+            }
+            const actualRevision = server.SessionSwitchEnvelope?.revision ?? 0;
+            if (actualRevision !== expectedRevision) {
+                throw new ConcurrentSessionWriteError(actualRevision);
+            }
+
+            server.SessionSwitchEnvelope = durableEnvelope;
+            const isQuarantined = durableEnvelope.marker?.kind === 'QuarantinedSession';
+            server.UserId = isQuarantined ? null : durableEnvelope.activeSession.profileUserId;
+            server.AccessToken = isQuarantined ? null : durableEnvelope.activeSession.credentialRef.token;
+            server.OwnerUserId = durableEnvelope.recoverySession?.ownerUserId || null;
+            server.OwnerAccessToken = durableEnvelope.recoverySession?.credentialRef.token || null;
+            server.DateLastAccessed = new Date().getTime();
+            this.advanceSessionAuthorityRevision(server);
+
+            this.persistCredentials(previousCredentials, nextCredentials);
+            this.assertSessionEnvelopeWriteWon(serverId, durableEnvelope, expectedAuthorityRevision + 1);
+            this.notifySessionSwitchEnvelope(serverId, durableEnvelope);
+        });
+    }
+
+    clearSessionSwitchEnvelope(serverId) {
+        return this.updateSavedServer(serverId, savedServer => {
+            savedServer.SessionSwitchEnvelope = null;
+            savedServer.OwnerUserId = null;
+            savedServer.OwnerAccessToken = null;
+        }, {
+            advanceSessionAuthority: true,
+            notifySessionEnvelope: true
+        });
+    }
+
+    subscribeSessionSwitchEnvelope(serverId, listener) {
+        let listeners = this.sessionEnvelopeListeners.get(serverId);
+        if (!listeners) {
+            listeners = new Set();
+            this.sessionEnvelopeListeners.set(serverId, listeners);
+        }
+        listeners.add(listener);
+
+        return () => {
+            listeners.delete(listener);
+            if (listeners.size === 0) {
+                this.sessionEnvelopeListeners.delete(serverId);
+            }
+        };
+    }
+
+    notifySessionSwitchEnvelope(serverId, envelope) {
+        this.sessionEnvelopeListeners.get(serverId)?.forEach(listener => {
+            listener(envelope ? JSON.parse(JSON.stringify(envelope)) : null);
+        });
+    }
+
+    getActiveProfileSession(serverId) {
+        const envelope = this.getSessionSwitchEnvelope(serverId);
+        return envelope?.marker?.kind === 'QuarantinedSession' ? null : envelope?.activeSession || null;
+    }
+
+    getOwnerRecoverySession(serverId) {
+        const envelope = this.getSessionSwitchEnvelope(serverId);
+        return envelope?.recoverySession || null;
+    }
+
+    async cacheOwnerSession(serverId, ownerUserId, ownerAccessToken) {
         if (!serverId || !ownerUserId || !ownerAccessToken) {
             return;
         }
 
-        this.updateSavedServer(serverId, server => {
+        const envelope = this.getSessionSwitchEnvelope(serverId);
+        if (envelope) {
+            await this.replaceSessionSwitchEnvelope(serverId, envelope.revision, {
+                ...envelope,
+                revision: envelope.revision + 1,
+                recoverySession: createOwnerRecoverySession(
+                    serverId,
+                    envelope.activeSession.deviceId,
+                    ownerUserId,
+                    ownerAccessToken
+                )
+            });
+            return;
+        }
+
+        await this.mutateCredentials(credentials => {
+            const server = credentials.Servers.find(savedServer => savedServer.Id === serverId);
+            if (!server) {
+                return null;
+            }
             server.OwnerUserId = ownerUserId;
             server.OwnerAccessToken = ownerAccessToken;
+            return JSON.parse(JSON.stringify(server));
         });
+    }
+
+    readFreshCredentials() {
+        const serialized = this.credentialStorage().getItem(this.sessionCredentialProvider.key);
+        if (serialized === null) {
+            return { Servers: [] };
+        }
+
+        return parseStoredCredentials(serialized);
+    }
+
+    withSessionEnvelopeLock(_serverId, operation) {
+        const lockManager = navigator['locks'];
+        if (!lockManager || typeof lockManager.request !== 'function') {
+            throw new SessionSwitchUnsupportedEngineError();
+        }
+
+        const lockName = `${this.sessionCredentialProvider.key}:credentials`;
+        return lockManager.request(lockName, { mode: 'exclusive' }, lock => {
+            if (!lock) {
+                throw new SessionSwitchUnsupportedEngineError();
+            }
+            return operation();
+        });
+    }
+
+    beforeSessionEnvelopeSink() {
+        return Promise.resolve();
+    }
+
+    assertSessionEnvelopeWriteWon(serverId, envelope, authorityRevision) {
+        const storedCredentials = this.readFreshCredentials();
+        const storedServer = storedCredentials.Servers.find(server => server.Id === serverId);
+        const storedEnvelope = storedServer?.SessionSwitchEnvelope;
+
+        if (JSON.stringify(storedEnvelope) !== JSON.stringify(envelope)
+            || this.getSessionAuthorityRevision(storedServer) !== authorityRevision) {
+            throw new ConcurrentSessionWriteError(storedEnvelope?.revision ?? 0);
+        }
+    }
+
+    getSessionAuthorityRevision(server) {
+        return readSessionAuthorityRevision(server);
+    }
+
+    advanceSessionAuthorityRevision(server) {
+        const revision = this.getSessionAuthorityRevision(server);
+        if (revision === Number.MAX_SAFE_INTEGER) {
+            throw new SessionStorageCorruptionError();
+        }
+        server.SessionSwitchAuthorityRevision = revision + 1;
+    }
+
+    persistCredentials(previousCredentials, nextCredentials) {
+        try {
+            this.sessionCredentialProvider.credentials(nextCredentials);
+        } catch (error) {
+            try {
+                this.sessionCredentialProvider.credentials(previousCredentials);
+            } catch {
+                // The original persistence failure remains actionable.
+            }
+            throw error;
+        }
+    }
+
+    credentialStorage() {
+        return this.sessionCredentialProvider.appStorage || window.localStorage;
     }
 
     setProfileSelectorAvailability(serverId, isEnabled) {
         if (!serverId) {
-            return;
+            return Promise.resolve(null);
         }
 
-        this.updateSavedServer(serverId, server => {
+        return this.updateSavedServer(serverId, server => {
             server.ProfileSelectorEnabled = !!isEnabled;
         });
     }
@@ -180,18 +547,15 @@ class ServerConnections extends ConnectionManager {
             throw new Error('[ServerConnection] Invalid profile selector authentication result');
         }
 
-        const server = this.updateSavedServer(serverId, savedServer => {
+        const server = await this.mutateCredentials(credentials => {
+            const savedServer = credentials.Servers.find(candidate => candidate.Id === serverId);
+            if (!savedServer) {
+                return null;
+            }
             savedServer.UserId = authenticationResult.User.Id;
             savedServer.AccessToken = authenticationResult.AccessToken;
             savedServer.DateLastAccessed = new Date().getTime();
-
-            if (!savedServer.OwnerUserId) {
-                savedServer.OwnerUserId = authenticationResult.User.Id;
-            }
-
-            if (!savedServer.OwnerAccessToken && savedServer.OwnerUserId === authenticationResult.User.Id) {
-                savedServer.OwnerAccessToken = authenticationResult.AccessToken;
-            }
+            return JSON.parse(JSON.stringify(savedServer));
         });
 
         if (!server) {

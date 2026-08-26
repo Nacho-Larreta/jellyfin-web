@@ -13,6 +13,25 @@ import { ConnectionState } from './connectionState';
 
 const DEFAULT_CONNECTION_TIMEOUT = 20000;
 
+const SESSION_AUTHORITY_FIELDS = new Set([
+    'AccessToken',
+    'ExchangeToken',
+    'OwnerAccessToken',
+    'OwnerUserId',
+    'SessionSwitchAuthorityRevision',
+    'SessionSwitchEnvelope',
+    'UserId'
+]);
+
+export function revokeSavedSessionAuthority(server) {
+    server.UserId = null;
+    server.AccessToken = null;
+    server.ExchangeToken = null;
+    server.OwnerUserId = null;
+    server.OwnerAccessToken = null;
+    server.SessionSwitchEnvelope = null;
+}
+
 function getServerAddress(server, mode) {
     switch (mode) {
         case ConnectionMode.Local:
@@ -53,12 +72,36 @@ function sortByAccess(a, b) {
     return (b.DateLastAccessed || 0) - (a.DateLastAccessed || 0);
 }
 
+function findSavedServer(servers, candidate) {
+    return servers.find(server => candidate.Id && server.Id === candidate.Id)
+        || servers.find(server =>
+            (candidate.ManualAddress && equalsIgnoreCase(server.ManualAddress, candidate.ManualAddress))
+            || (candidate.LocalAddress && equalsIgnoreCase(server.LocalAddress, candidate.LocalAddress))
+            || (candidate.RemoteAddress && equalsIgnoreCase(server.RemoteAddress, candidate.RemoteAddress)));
+}
+
+function mergeServerMetadata(target, source) {
+    Object.entries(source).forEach(([ key, value ]) => {
+        if (!SESSION_AUTHORITY_FIELDS.has(key)) {
+            target[key] = value;
+        }
+    });
+    return target;
+}
+
 export default class ConnectionManager {
     constructor(credentialProvider, appName, appVersion, deviceName, deviceId, capabilities) {
         console.log('Begin ConnectionManager constructor');
 
         const self = this;
         this._apiClients = [];
+
+        self.mutateCredentials = mutation => {
+            const credentials = credentialProvider.credentials();
+            const result = mutation(credentials);
+            credentialProvider.credentials(credentials);
+            return Promise.resolve(result);
+        };
 
         // Set the minimum version to match the SDK
         self._minServerVersion = MINIMUM_VERSION;
@@ -117,9 +160,11 @@ export default class ConnectionManager {
             apiClient.onAuthenticated = (instance, result) => onAuthenticated(instance, result, {}, true);
 
             if (!existingServers.length) {
-                const credentials = credentialProvider.credentials();
-                credentials.Servers = [existingServer];
-                credentialProvider.credentials(credentials);
+                void self.mutateCredentials(credentials => {
+                    if (!findSavedServer(credentials.Servers, existingServer)) {
+                        credentials.Servers.push(mergeServerMetadata({}, existingServer));
+                    }
+                });
             }
 
             events.trigger(self, 'apiclientcreated', [apiClient]);
@@ -128,9 +173,9 @@ export default class ConnectionManager {
         self.clearData = () => {
             console.log('connection manager clearing data');
 
-            const credentials = credentialProvider.credentials();
-            credentials.Servers = [];
-            credentialProvider.credentials(credentials);
+            return self.mutateCredentials(credentials => {
+                credentials.Servers = [];
+            });
         };
 
         self._getOrAddApiClient = (server, serverUrl) => {
@@ -168,35 +213,27 @@ export default class ConnectionManager {
         };
 
         function onAuthenticated(apiClient, result, options, saveCredentials) {
-            const credentials = credentialProvider.credentials();
-            const servers = credentials.Servers.filter((s) => s.Id === result.ServerId);
-
-            const server = servers.length ? servers[0] : apiClient.serverInfo();
-
-            if (options.updateDateLastAccessed !== false) {
-                server.DateLastAccessed = new Date().getTime();
-            }
-            server.Id = result.ServerId;
-
-            if (saveCredentials) {
-                server.UserId = result.User.Id;
-                server.AccessToken = result.AccessToken;
-            } else {
-                server.UserId = null;
-                server.AccessToken = null;
-            }
-
-            credentialProvider.addOrUpdateServer(credentials.Servers, server);
-            credentialProvider.credentials(credentials);
-
-            // set this now before updating server info, otherwise it won't be set in time
-            apiClient.enableAutomaticBitrateDetection = options.enableAutomaticBitrateDetection;
-
-            apiClient.serverInfo(server);
-            apiClient.setAuthenticationInfo(result.AccessToken, result.User.Id);
-            afterConnected(apiClient, options);
-
-            return onLocalUserSignIn(server, apiClient.serverAddress(), result.User);
+            return self.mutateCredentials(credentials => {
+                const sourceServer = apiClient.serverInfo();
+                const server = credentials.Servers.find(savedServer => savedServer.Id === result.ServerId)
+                    || mergeServerMetadata({ Id: result.ServerId }, sourceServer);
+                mergeServerMetadata(server, sourceServer);
+                if (options.updateDateLastAccessed !== false) {
+                    server.DateLastAccessed = new Date().getTime();
+                }
+                server.Id = result.ServerId;
+                revokeSavedSessionAuthority(server);
+                server.UserId = saveCredentials ? result.User.Id : null;
+                server.AccessToken = saveCredentials ? result.AccessToken : null;
+                credentialProvider.addOrUpdateServer(credentials.Servers, server);
+                return { ...server };
+            }).then(server => {
+                apiClient.enableAutomaticBitrateDetection = options.enableAutomaticBitrateDetection;
+                apiClient.serverInfo(server);
+                apiClient.setAuthenticationInfo(result.AccessToken, result.User.Id);
+                afterConnected(apiClient, options);
+                return onLocalUserSignIn(server, apiClient.serverAddress(), result.User);
+            });
         }
 
         function afterConnected(apiClient, options = {}) {
@@ -245,13 +282,9 @@ export default class ConnectionManager {
             }).then(
                 (systemInfo) => {
                     updateServerInfo(server, systemInfo);
-                    return Promise.resolve();
+                    return true;
                 },
-                () => {
-                    server.UserId = null;
-                    server.AccessToken = null;
-                    return Promise.resolve();
-                }
+                () => false
             );
         }
 
@@ -313,19 +346,11 @@ export default class ConnectionManager {
             }
 
             return Promise.all(promises).then(() => {
-                const credentials = credentialProvider.credentials();
-
-                const servers = credentials.Servers.filter((u) => u.UserLinkType !== 'Guest');
-
-                for (let j = 0, numServers = servers.length; j < numServers; j++) {
-                    const server = servers[j];
-
-                    server.UserId = null;
-                    server.AccessToken = null;
-                    server.ExchangeToken = null;
-                    server.OwnerUserId = null;
-                    server.OwnerAccessToken = null;
-                }
+                return self.mutateCredentials(credentials => {
+                    credentials.Servers
+                        .filter(server => server.UserLinkType !== 'Guest')
+                        .forEach(revokeSavedSessionAuthority);
+                });
             });
         };
 
@@ -359,20 +384,20 @@ export default class ConnectionManager {
         self.getAvailableServers = () => {
             console.debug('[ConnectionManager] Begin getAvailableServers');
 
-            // Clone the array
-            const credentials = credentialProvider.credentials();
-
             return findServers().then(foundServers => {
-                const servers = credentials.Servers.slice(0);
-                foundServers.forEach(server => {
-                    credentialProvider.addOrUpdateServer(servers, server);
+                return self.mutateCredentials(credentials => {
+                    foundServers.forEach(foundServer => {
+                        const existingServer = findSavedServer(credentials.Servers, foundServer);
+                        if (existingServer) {
+                            mergeServerMetadata(existingServer, foundServer);
+                        } else {
+                            credentials.Servers.push({ ...foundServer });
+                        }
+                    });
+
+                    credentials.Servers.sort(sortByAccess);
+                    return credentials.Servers.slice(0);
                 });
-
-                servers.sort(sortByAccess);
-                credentials.Servers = servers;
-                credentialProvider.credentials(credentials);
-
-                return servers;
             });
         };
 
@@ -569,28 +594,48 @@ export default class ConnectionManager {
         };
 
         function onSuccessfulConnection(server, systemInfo, connectionMode, serverUrl, verifyLocalAuthentication, resolve, options = {}) {
-            const credentials = credentialProvider.credentials();
-
-            if (options.enableAutoLogin === false) {
-                server.UserId = null;
-                server.AccessToken = null;
-            } else if (server.AccessToken && verifyLocalAuthentication) {
-                void validateAuthentication(server, serverUrl).then(function () {
-                    onSuccessfulConnection(server, systemInfo, connectionMode, serverUrl, false, resolve, options);
+            if (options.enableAutoLogin !== false && server.AccessToken && verifyLocalAuthentication) {
+                void validateAuthentication(server, serverUrl).then(function (isValid) {
+                    onSuccessfulConnection(
+                        server,
+                        systemInfo,
+                        connectionMode,
+                        serverUrl,
+                        false,
+                        resolve,
+                        {
+                            ...options,
+                            invalidateSavedAuthentication: !isValid
+                        }
+                    );
                 });
                 return;
             }
 
-            updateServerInfo(server, systemInfo);
+            void self.mutateCredentials(credentials => {
+                const savedServer = findSavedServer(credentials.Servers, server)
+                    || mergeServerMetadata({}, server);
+                mergeServerMetadata(savedServer, server);
+                if (options.enableAutoLogin === false || options.invalidateSavedAuthentication) {
+                    revokeSavedSessionAuthority(savedServer);
+                }
+                updateServerInfo(savedServer, systemInfo);
+                savedServer.LastConnectionMode = connectionMode;
+                if (options.updateDateLastAccessed !== false) {
+                    savedServer.DateLastAccessed = new Date().getTime();
+                }
+                credentialProvider.addOrUpdateServer(credentials.Servers, savedServer);
+                return { ...savedServer };
+            }).then(savedServer => {
+                finishSuccessfulConnection(savedServer, systemInfo, connectionMode, serverUrl, resolve, options);
+            }, () => {
+                resolve({
+                    State: ConnectionState.Unavailable
+                });
+            });
+        }
 
-            server.LastConnectionMode = connectionMode;
-
-            if (options.updateDateLastAccessed !== false) {
-                server.DateLastAccessed = new Date().getTime();
-            }
-            credentialProvider.addOrUpdateServer(credentials.Servers, server);
-            credentialProvider.credentials(credentials);
-
+        function finishSuccessfulConnection(server, systemInfo, _connectionMode, serverUrl, resolve, options) {
             const result = {
                 Servers: []
             };
@@ -628,17 +673,17 @@ export default class ConnectionManager {
         }
 
         self.updateSavedServerId = async (server) => {
+            const previousServerId = server.Id;
             const { data: serverResponse } = await tryReconnect(server);
-            // Update the server ID to match the new value
-            server.Id = serverResponse.Id;
-            // Force the user to login again
-            server.AccessToken = null;
-            server.UserId = null;
-
-            // Save the updated server in the credential provider
-            const credentials = credentialProvider.credentials();
-            credentialProvider.addOrUpdateServer(credentials.Servers, server);
-            credentialProvider.credentials(credentials);
+            await self.mutateCredentials(credentials => {
+                const savedServer = credentials.Servers.find(candidate => candidate.Id === previousServerId)
+                    || mergeServerMetadata({}, server);
+                mergeServerMetadata(savedServer, server);
+                savedServer.Id = serverResponse.Id;
+                revokeSavedSessionAuthority(savedServer);
+                credentials.Servers = credentials.Servers.filter(candidate => candidate.Id !== previousServerId);
+                credentialProvider.addOrUpdateServer(credentials.Servers, savedServer);
+            });
         };
 
         function tryConnectToAddress(address, options) {
@@ -695,22 +740,8 @@ export default class ConnectionManager {
                 throw new Error('null serverId');
             }
 
-            let server = credentialProvider.credentials().Servers.filter((s) => s.Id === serverId);
-            server = server.length ? server[0] : null;
-
-            return new Promise((resolve) => {
-                function onDone() {
-                    const credentials = credentialProvider.credentials();
-
-                    credentials.Servers = credentials.Servers.filter((s) => s.Id !== serverId);
-
-                    credentialProvider.credentials(credentials);
-                    resolve();
-                }
-
-                if (!server.ConnectServerId) {
-                    onDone();
-                }
+            return self.mutateCredentials(credentials => {
+                credentials.Servers = credentials.Servers.filter(server => server.Id !== serverId);
             });
         };
     }
