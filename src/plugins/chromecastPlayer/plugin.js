@@ -8,34 +8,18 @@ import { ServerConnections } from 'lib/jellyfin-apiclient';
 import { PluginType } from '../../types/plugin.ts';
 import Events from '../../utils/events.ts';
 import { getItems } from '../../utils/jellyfin-apiclient/getItems.ts';
+import {
+    checkCastConnectionReceipt,
+    clearCastConnectionReceipt,
+    createCastActivationOwner,
+    readRestoredCastReceipt,
+    reserveCastConnectionReceipt,
+    writeCastConnectionReceipt
+} from '../../components/playback/castActivationAuthority';
 
 // Based on https://github.com/googlecast/CastVideos-chrome/blob/master/CastVideos.js
 
 const PlayerName = 'Google Cast';
-
-/*
- * Some async CastSDK function are completed with callbacks.
- * sendConnectionResult turns this into completion as a promise.
- */
-let _currentResolve = null;
-let _currentReject = null;
-function sendConnectionResult(isOk) {
-    const resolve = _currentResolve;
-    const reject = _currentReject;
-
-    _currentResolve = null;
-    _currentReject = null;
-
-    if (isOk) {
-        if (resolve) {
-            resolve();
-        }
-    } else if (reject) {
-        reject();
-    } else {
-        playbackManager.removeActivePlayer(PlayerName);
-    }
-}
 
 /**
  * Constants of states for Chromecast device
@@ -63,8 +47,34 @@ const PLAYER_STATE = {
 
 const messageNamespace = 'urn:x-cast:com.connectsdk';
 
+function rejectedDelivery(reason) {
+    const result = Promise.reject(new Error(reason));
+    result.catch(() => undefined);
+    return result;
+}
+
+function detachListener(remove) {
+    try {
+        remove();
+    } catch {
+        // The local owner still retires if the Cast SDK has already torn down the session.
+    }
+}
+
 class CastPlayer {
     constructor() {
+        this.initializationOwner = createCastActivationOwner();
+        this.connection = null;
+        this.candidate = null;
+        this.restoreSelectionRevision = playbackManager.observeCastRestoreAuthority(this.initializationOwner);
+        this.unsubscribeCastSelection = playbackManager.subscribeCastSelection(() => {
+            this.rejectPending();
+            this.discardCandidate();
+            this.detachConnection();
+        });
+        this.pending = null;
+        this.retryTimer = null;
+        this.retired = false;
         /* device variables */
         // @type {DEVICE_STATE} A state for device
         this.deviceState = DEVICE_STATE.IDLE;
@@ -80,11 +90,72 @@ class CastPlayer {
 
         this.hasReceivers = false;
 
-        // bind once - commit 2ebffc2271da0bc5e8b13821586aee2a2e3c7753
-        this.errorHandler = this.onError.bind(this);
-        this.mediaStatusUpdateHandler = this.onMediaStatusUpdate.bind(this);
-
+        this.initializationOwner?.onInvalidated(() => this.retire());
         this.initializeCastPlayer();
+    }
+
+    retire() {
+        if (this.retired) return;
+        this.retired = true;
+        this.unsubscribeCastSelection();
+        clearTimeout(this.retryTimer);
+        this.rejectPending();
+        this.discardCandidate();
+        this.detachConnection();
+        this.initializationOwner?.retire();
+    }
+
+    rejectPending(pending = this.pending) {
+        if (!pending || this.pending !== pending) return;
+        this.pending = null;
+        pending.unsubscribe?.();
+        if (this.candidate?.pending === pending) this.discardCandidate();
+        if (pending.reservation?.token) void clearCastConnectionReceipt(pending.owner, null, pending.reservation.token);
+        pending.reject(new Error('Cast activation expired'));
+    }
+
+    currentConnection(connection = this.connection) {
+        return !this.retired && !!connection && this.connection === connection && connection.owner.current()
+            && this.session === connection.session
+            && connection.selectionRevision === playbackManager.getCastSelectionRevision()
+            && (!connection.restored || playbackManager.canRestoreOwnedCast(connection.owner, this.restoreSelectionRevision));
+    }
+
+    currentCandidate(connection) {
+        return !this.retired && this.candidate === connection && connection.owner.current()
+            && (!connection.pending || this.pending === connection.pending)
+            && connection.selectionRevision === playbackManager.getCastSelectionRevision()
+            && (!connection.restored || playbackManager.canRestoreOwnedCast(connection.owner, this.restoreSelectionRevision));
+    }
+
+    discardCandidate(connection = this.candidate) {
+        if (!connection || this.candidate !== connection) return false;
+        this.candidate = null;
+        for (const cancel of connection.pendingMessages) cancel();
+        connection.pendingMessages.clear();
+        void clearCastConnectionReceipt(connection.owner, connection.session, connection.receiptToken);
+        return true;
+    }
+
+    detachConnection(connection = this.connection) {
+        if (!connection || this.connection !== connection) return;
+        this.connection = null;
+        const { session, listeners, media, owner } = connection;
+        for (const cancel of connection.pendingMessages) cancel();
+        connection.pendingMessages.clear();
+        detachListener(() => session.removeMessageListener?.(messageNamespace, listeners.message));
+        detachListener(() => session.removeMediaListener?.(listeners.media));
+        detachListener(() => session.removeUpdateListener?.(listeners.update));
+        detachListener(() => media?.removeUpdateListener?.(listeners.mediaUpdate));
+        connection.unsubscribe?.();
+        void clearCastConnectionReceipt(owner, session, connection.receiptToken);
+        if (this.session === session) this.session = null;
+        this.currentMediaSession = null;
+        this.deviceState = DEVICE_STATE.IDLE;
+        this.castPlayerState = PLAYER_STATE.IDLE;
+        document.removeEventListener('volumeupbutton', onVolumeUpKeyDown, false);
+        document.removeEventListener('volumedownbutton', onVolumeDownKeyDown, false);
+        playbackManager.removeOwnedCastPlayer(owner);
     }
 
     /**
@@ -95,20 +166,27 @@ class CastPlayer {
      */
     initializeCastPlayer() {
         const chrome = window.chrome;
+        const owner = this.initializationOwner;
+        if (this.retired || !owner?.current() || this.isInitialized) return;
         if (!chrome) {
             console.warn('Not initializing chromecast: chrome object is missing');
             return;
         }
 
         if (!chrome.cast?.isAvailable) {
-            setTimeout(this.initializeCastPlayer.bind(this), 1000);
+            clearTimeout(this.retryTimer);
+            this.retryTimer = setTimeout(() => {
+                this.retryTimer = null;
+                if (owner.current()) this.initializeCastPlayer();
+            }, 1000);
             return;
         }
 
         const apiClient = ServerConnections.currentApiClient();
-        const userId = apiClient.getCurrentUserId();
+        if (!owner.current()) return;
 
-        apiClient.getUser(userId).then(user => {
+        apiClient.getUser(owner.profileUserId).then(user => {
+            if (!owner.current() || this.retired) return;
             const applicationID = user.Configuration.CastReceiverId;
             if (!applicationID) {
                 console.warn(`Not initializing chromecast: CastReceiverId is ${applicationID}`);
@@ -118,18 +196,22 @@ class CastPlayer {
             // request session
             const sessionRequest = new chrome.cast.SessionRequest(applicationID);
             const apiConfig = new chrome.cast.ApiConfig(sessionRequest,
-                this.sessionListener.bind(this),
-                this.receiverListener.bind(this));
+                session => this.sessionListener(session, owner),
+                availability => this.receiverListener(availability, owner));
 
             console.debug(`chromecast.initialize (applicationId=${applicationID})`);
-            chrome.cast.initialize(apiConfig, this.onInitSuccess.bind(this), this.errorHandler);
-        });
+            if (owner.current()) {
+                chrome.cast.initialize(apiConfig,
+                    () => this.onInitSuccess(owner), () => this.onError(owner));
+            }
+        }).catch(() => this.onError(owner));
     }
 
     /**
      * Callback function for init success
      */
-    onInitSuccess() {
+    onInitSuccess(owner) {
+        if (this.retired || !owner.current()) return;
         this.isInitialized = true;
         console.debug('[chromecastPlayer] init success');
     }
@@ -137,7 +219,8 @@ class CastPlayer {
     /**
      * Generic error callback function
      */
-    onError() {
+    onError(owner = this.connection?.owner) {
+        if (owner && !owner.current()) return;
         console.debug('[chromecastPlayer] error');
     }
 
@@ -148,31 +231,39 @@ class CastPlayer {
      * join existing session and occur in Cast mode and media
      * status gets synced up with current media of the session
      */
-    sessionListener(e) {
-        this.session = e;
-        if (this.session) {
-            if (this.session.media[0]) {
-                this.onMediaDiscovered('activeSession', this.session.media[0]);
-            }
-
-            this.onSessionConnected(e);
+    async sessionListener(session, owner) {
+        if (this.retired || !owner.current() || !session || this.pending
+            || !playbackManager.canRestoreOwnedCast(owner, this.restoreSelectionRevision)) return;
+        const claim = await readRestoredCastReceipt(owner, session, PlayerName);
+        if (claim.status !== 'claimed') return;
+        if (this.retired || !owner.current() || this.pending
+            || !playbackManager.canRestoreOwnedCast(owner, this.restoreSelectionRevision)) {
+            void clearCastConnectionReceipt(owner, session, claim.token);
+            return;
         }
+        this.onSessionConnected(session, owner, null, true, claim.token);
     }
 
     // messageListener - receive callback messages from the Cast receiver
-    messageListener(namespace, message) {
+    messageListener(namespace, message, connection) {
+        if (!this.currentConnection(connection)) return;
         if (typeof (message) === 'string') {
-            message = JSON.parse(message);
+            try {
+                message = JSON.parse(message);
+            } catch {
+                return;
+            }
         }
+        if (!message || typeof message !== 'object') return;
 
         if (message.type === 'playbackerror') {
             const errorCode = message.data;
-            setTimeout(function () {
-                alertText(globalize.translate('MessagePlaybackError' + errorCode), globalize.translate('HeaderPlaybackError'));
+            setTimeout(() => {
+                if (this.currentConnection(connection)) alertText(globalize.translate('MessagePlaybackError' + errorCode), globalize.translate('HeaderPlaybackError'));
             }, 300);
         } else if (message.type === 'connectionerror') {
-            setTimeout(function () {
-                alertText(globalize.translate('MessageChromecastConnectionError'), globalize.translate('HeaderError'));
+            setTimeout(() => {
+                if (this.currentConnection(connection)) alertText(globalize.translate('MessageChromecastConnectionError'), globalize.translate('HeaderError'));
             }, 300);
         } else if (message.type) {
             Events.trigger(this, message.type, [message.data]);
@@ -184,7 +275,8 @@ class CastPlayer {
      * This indicates availability of receivers but
      * does not provide a list of device IDs
      */
-    receiverListener(e) {
+    receiverListener(e, owner) {
+        if (this.retired || !owner.current()) return;
         if (e === 'available') {
             console.debug('[chromecastPlayer] receiver found');
             this.hasReceivers = true;
@@ -197,20 +289,13 @@ class CastPlayer {
     /**
      * session update listener
      */
-    sessionUpdateListener(isAlive) {
+    sessionUpdateListener(isAlive, connection) {
+        if (!this.currentConnection(connection)) return;
         if (isAlive) {
             console.debug('[chromecastPlayer] sessionUpdateListener: already alive');
         } else {
-            this.session = null;
-            this.deviceState = DEVICE_STATE.IDLE;
-            this.castPlayerState = PLAYER_STATE.IDLE;
-            document.removeEventListener('volumeupbutton', onVolumeUpKeyDown, false);
-            document.removeEventListener('volumedownbutton', onVolumeDownKeyDown, false);
-
-            console.debug('[chromecastPlayer] sessionUpdateListener: setting currentMediaSession to null');
-            this.currentMediaSession = null;
-
-            sendConnectionResult(false);
+            void clearCastConnectionReceipt(connection.owner, connection.session, connection.receiptToken);
+            this.detachConnection(connection);
         }
     }
 
@@ -219,76 +304,214 @@ class CastPlayer {
      * passed to the API at initialization time is used; this may be overridden by passing a different
      * session request in opt_sessionRequest.
      */
-    launchApp() {
+    launchApp(pending) {
+        if (!pending.owner.current() || this.pending !== pending) return;
         console.debug('[chromecastPlayer] launching app...');
-        chrome.cast.requestSession(this.onRequestSessionSuccess.bind(this), this.onLaunchError.bind(this));
+        window.chrome.cast.requestSession(
+            session => this.onRequestSessionSuccess(session, pending),
+            () => this.onLaunchError(pending));
     }
 
     /**
      * Callback function for request session success
      * @param {Object} e A chrome.cast.Session object
      */
-    onRequestSessionSuccess(e) {
-        console.debug('[chromecastPlayer] session success: ' + e.sessionId);
-        this.onSessionConnected(e);
+    onRequestSessionSuccess(session, pending) {
+        if (this.pending !== pending || !pending.owner.current() || this.retired) return;
+        if (this.candidate?.pending === pending) return;
+        this.onSessionConnected(session, pending.owner, pending, false, pending.reservation?.token);
     }
 
-    onSessionConnected(session) {
+    onSessionConnected(session, owner, pending, restored, receiptToken) {
+        if (this.retired || !owner.current() || pending && this.pending !== pending) return;
+        if (!session?.sessionId || !session.receiver?.label) {
+            if (pending) this.rejectPending(pending);
+            return;
+        }
+        this.discardCandidate();
+        const connection = {
+            owner, session, pending, restored, selectionRevision: playbackManager.getCastSelectionRevision(),
+            media: null, listeners: null, unsubscribe: null,
+            receiptToken, pendingMessages: new Set()
+        };
+        connection.listeners = {
+            message: (namespace, message) => this.messageListener(namespace, message, connection),
+            media: media => this.sessionMediaListener(media, connection),
+            update: alive => this.sessionUpdateListener(alive, connection),
+            mediaUpdate: alive => this.onMediaStatusUpdate(alive, connection)
+        };
+        this.candidate = connection;
+        void this.completeCandidate(connection);
+    }
+
+    async completeCandidate(connection) {
+        const { owner, session, restored, receiptToken } = connection;
+        const currentReceipt = receiptToken ? checkCastConnectionReceipt(owner, receiptToken) :
+            Promise.resolve({ status: restored ? 'missing' : 'unavailable' });
+        try {
+            const result = await currentReceipt;
+            if (!this.currentCandidate(connection)) return;
+            const accepted = restored ? result.status === 'current' :
+                result.status === 'current' || result.status === 'unavailable';
+            if (!accepted) {
+                this.failCandidate(connection);
+                return;
+            }
+            await this.sendIdentify(connection);
+            if (!this.currentCandidate(connection)) return;
+            let persistence = { status: 'unavailable' };
+            if (restored) {
+                persistence = await checkCastConnectionReceipt(owner, receiptToken);
+            } else if (receiptToken) {
+                persistence = await writeCastConnectionReceipt(owner, PlayerName, session, receiptToken);
+            }
+            if (!this.currentCandidate(connection)) return;
+            const confirmed = restored ? persistence.status === 'current' :
+                persistence.status === 'confirmed' || persistence.status === 'unavailable';
+            if (!confirmed) {
+                this.failCandidate(connection);
+                return;
+            }
+            this.publishCandidate(connection);
+        } catch {
+            this.failCandidate(connection);
+        }
+    }
+
+    sendIdentify(connection) {
+        if (!this.currentCandidate(connection)) return rejectedDelivery('Cast activation expired');
+        const { owner, session } = connection;
+        const payload = {
+            options: {}, command: 'Identify', ...owner.credential,
+            receiverName: session.receiver?.friendlyName ?? null
+        };
+        const bitrateSetting = appSettings.maxChromecastBitrate();
+        if (bitrateSetting) payload.maxBitrate = bitrateSetting;
+        return this.sendMessageInternal(payload, connection, () => this.currentCandidate(connection));
+    }
+
+    failCandidate(connection) {
+        if (this.discardCandidate(connection) && connection.pending) this.rejectPending(connection.pending);
+    }
+
+    keepPublishedConnection(connection) {
+        if (this.currentConnection(connection)) return true;
+        this.detachConnection(connection);
+        if (connection.pending) this.rejectPending(connection.pending);
+        return false;
+    }
+
+    publishCandidate(connection) {
+        if (!this.currentCandidate(connection)) return;
+        this.detachConnection();
+        if (!this.currentCandidate(connection)) return;
+        const { owner, session, pending, restored } = connection;
+        this.candidate = null;
+        this.connection = connection;
         this.session = session;
         this.deviceState = DEVICE_STATE.ACTIVE;
-
-        this.session.addMessageListener(messageNamespace, this.messageListener.bind(this));
-        this.session.addMediaListener(this.sessionMediaListener.bind(this));
-        this.session.addUpdateListener(this.sessionUpdateListener.bind(this));
-
+        connection.unsubscribe = owner.onInvalidated(() => this.detachConnection(connection));
+        if (!this.keepPublishedConnection(connection)) return;
+        try {
+            session.addMessageListener(messageNamespace, connection.listeners.message);
+            if (!this.keepPublishedConnection(connection)) return;
+            session.addMediaListener(connection.listeners.media);
+            if (!this.keepPublishedConnection(connection)) return;
+            session.addUpdateListener(connection.listeners.update);
+        } catch {
+            this.detachConnection(connection);
+            if (pending) this.rejectPending(pending);
+            return;
+        }
+        if (!this.keepPublishedConnection(connection)) return;
         document.addEventListener('volumeupbutton', onVolumeUpKeyDown, false);
         document.addEventListener('volumedownbutton', onVolumeDownKeyDown, false);
-
-        Events.trigger(this, 'connect');
-        this.sendMessage({
-            options: {},
-            command: 'Identify'
-        });
+        if (restored && session.media?.[0]) this.onMediaDiscovered('activeSession', session.media[0], connection);
+        if (!this.keepPublishedConnection(connection)) return;
+        Events.trigger(this, 'connect', [connection]);
+        if (!this.keepPublishedConnection(connection)) return;
+        if (pending) {
+            this.pending = null;
+            pending.unsubscribe?.();
+            pending.resolve();
+        }
     }
 
     /**
      * session update listener
      */
-    sessionMediaListener(e) {
+    sessionMediaListener(e, connection) {
+        if (!this.currentConnection(connection)) return;
         this.currentMediaSession = e;
-        this.currentMediaSession.addUpdateListener(this.mediaStatusUpdateHandler);
+        connection.media = e;
+        e.addUpdateListener(connection.listeners.mediaUpdate);
     }
 
     /**
      * Callback function for launch error
      */
-    onLaunchError() {
+    onLaunchError(pending) {
+        if (this.pending !== pending || !pending.owner.current()) return;
         console.debug('[chromecastPlayer] launch error');
         this.deviceState = DEVICE_STATE.ERROR;
-        sendConnectionResult(false);
+        this.rejectPending(pending);
+    }
+
+    pair(attempt) {
+        const owner = attempt?.owner;
+        if (!owner?.current() || this.retired || !this.isInitialized || this.pending) {
+            return Promise.reject(new Error('Cast activation unavailable'));
+        }
+        return new Promise((resolve, reject) => {
+            const pending = { attempt, owner, resolve, reject, unsubscribe: null };
+            this.pending = pending;
+            pending.unsubscribe = owner.onInvalidated(() => this.rejectPending(pending));
+            void reserveCastConnectionReceipt(owner, PlayerName).then(async reservation => {
+                pending.reservation = reservation;
+                if (this.pending !== pending || !owner.current()) {
+                    if (reservation.token) void clearCastConnectionReceipt(owner, null, reservation.token);
+                    return;
+                }
+                if (reservation.status !== 'reserved' && reservation.status !== 'unavailable') {
+                    this.rejectPending(pending);
+                    return;
+                }
+                if (reservation.token) {
+                    const current = await checkCastConnectionReceipt(owner, reservation.token);
+                    if (this.pending !== pending || !owner.current()) return;
+                    if (current.status !== 'current' && current.status !== 'unavailable') {
+                        this.rejectPending(pending);
+                        return;
+                    }
+                }
+                try {
+                    this.launchApp(pending);
+                } catch {
+                    this.rejectPending(pending);
+                }
+            }).catch(() => this.rejectPending(pending));
+        });
     }
 
     /**
      * Stops the running receiver application associated with the session.
      */
     stopApp() {
-        if (this.session) {
-            this.session.stop(this.onStopAppSuccess.bind(this, 'Session stopped'), this.errorHandler);
+        const connection = this.connection;
+        if (this.currentConnection(connection)) {
+            connection.session.stop(() => this.onStopAppSuccess('Session stopped', connection),
+                () => this.onError(connection.owner));
         }
     }
 
     /**
      * Callback function for stop app success
      */
-    onStopAppSuccess(message) {
+    onStopAppSuccess(message, connection) {
+        if (!this.currentConnection(connection)) return;
         console.debug(message);
-
-        this.deviceState = DEVICE_STATE.IDLE;
-        this.castPlayerState = PLAYER_STATE.IDLE;
-        document.removeEventListener('volumeupbutton', onVolumeUpKeyDown, false);
-        document.removeEventListener('volumedownbutton', onVolumeDownKeyDown, false);
-
-        this.currentMediaSession = null;
+        void clearCastConnectionReceipt(connection.owner, connection.session, connection.receiptToken);
+        this.detachConnection(connection);
     }
 
     /**
@@ -296,11 +519,8 @@ class CastPlayer {
      * @param {Number} mediaIndex - An index number to indicate current media content
      * @returns Promise
      */
-    loadMedia(options, command) {
-        if (!this.session) {
-            console.debug('[chromecastPlayer] no session');
-            return Promise.reject(new Error('no session'));
-        }
+    loadMedia(options, command, connection = this.connection) {
+        if (!this.currentConnection(connection)) return rejectedDelivery('Cast connection expired');
 
         // convert items to smaller stubs to send minimal amount of information
         options.items = options.items.map(function (i) {
@@ -317,67 +537,58 @@ class CastPlayer {
         return this.sendMessage({
             options: options,
             command: command
-        });
+        }, connection);
     }
 
-    sendMessage(message) {
-        const player = this;
-
-        let receiverName = null;
-
-        const session = player.session;
-
-        if (session?.receiver?.friendlyName) {
-            receiverName = session.receiver.friendlyName;
+    sendMessage(message, connection = this.connection) {
+        if (!this.currentConnection(connection)) return rejectedDelivery('Cast connection expired');
+        const { owner, session } = connection;
+        const options = message.options || {};
+        if (options.ServerId && options.ServerId !== owner.serverId
+            || options.serverId && options.serverId !== owner.serverId
+            || options.items?.some(item => item.ServerId !== owner.serverId)) {
+            return rejectedDelivery('Cast item belongs to a different server');
         }
-
-        let apiClient;
-        if (message.options?.ServerId) {
-            apiClient = ServerConnections.getApiClient(message.options.ServerId);
-        } else if (message.options?.items?.length) {
-            apiClient = ServerConnections.getApiClient(message.options.items[0].ServerId);
-        } else {
-            apiClient = ServerConnections.currentApiClient();
-        }
-
-        /* If serverAddress is localhost,this address can not be used for the cast receiver device.
-         * Use the local address (ULA, Unique Local Address) in that case.
-         */
-        const serverAddress = apiClient.serverAddress();
-        const hostname = (new URL(serverAddress)).hostname;
-        const isLocalhost = hostname === 'localhost' || hostname.startsWith('127.') || hostname === '[::1]';
-        const serverLocalAddress = isLocalhost ? apiClient.serverInfo().LocalAddress : serverAddress;
-
-        message = Object.assign(message, {
-            userId: apiClient.getCurrentUserId(),
-            deviceId: apiClient.deviceId(),
-            accessToken: apiClient.accessToken(),
-            serverAddress: serverLocalAddress,
-            serverId: apiClient.serverId(),
-            serverVersion: apiClient.serverVersion(),
-            receiverName: receiverName
-        });
-
-        console.debug('[chromecastPlayer] message{' + message.command + '; ' + serverAddress + ' -> ' + serverLocalAddress + '}');
+        const payload = {
+            ...message,
+            ...owner.credential,
+            receiverName: session.receiver?.friendlyName ?? null
+        };
 
         const bitrateSetting = appSettings.maxChromecastBitrate();
         if (bitrateSetting) {
-            message.maxBitrate = bitrateSetting;
+            payload.maxBitrate = bitrateSetting;
         }
 
-        if (message.options?.items) {
-            message.subtitleAppearance = userSettings.getSubtitleAppearanceSettings();
-            message.subtitleBurnIn = appSettings.get('subtitleburnin') || '';
+        if (options.items) {
+            payload.subtitleAppearance = userSettings.getSubtitleAppearanceSettings();
+            payload.subtitleBurnIn = appSettings.get('subtitleburnin') || '';
         }
 
-        return player.sendMessageInternal(message);
+        const delivery = this.sendMessageInternal(payload, connection);
+        delivery.catch(() => undefined);
+        return delivery;
     }
 
-    sendMessageInternal(message) {
-        message = JSON.stringify(message);
-
-        this.session.sendMessage(messageNamespace, message, this.onPlayCommandSuccess.bind(this), this.errorHandler);
-        return Promise.resolve();
+    sendMessageInternal(message, connection = this.connection, current = () => this.currentConnection(connection)) {
+        if (!current()) return rejectedDelivery('Cast connection expired');
+        return new Promise((resolve, reject) => {
+            const fail = () => {
+                connection.pendingMessages.delete(fail);
+                reject(new Error('Cast message delivery failed'));
+            };
+            connection.pendingMessages.add(fail);
+            try {
+                connection.session.sendMessage(messageNamespace, JSON.stringify(message), () => {
+                    if (!current()) return fail();
+                    connection.pendingMessages.delete(fail);
+                    this.onPlayCommandSuccess();
+                    resolve();
+                }, fail);
+            } catch {
+                fail();
+            }
+        });
     }
 
     onPlayCommandSuccess() {
@@ -388,7 +599,8 @@ class CastPlayer {
      * Callback function for loadMedia success
      * @param {Object} media A new media object.
      */
-    onMediaDiscovered(how, media) {
+    onMediaDiscovered(how, media, connection = this.connection) {
+        if (!this.currentConnection(connection)) return;
         console.debug('[chromecastPlayer] new media session ID:' + media.mediaSessionId + ' (' + how + ')');
         this.currentMediaSession = media;
 
@@ -400,14 +612,16 @@ class CastPlayer {
             this.castPlayerState = media.playerState;
         }
 
-        this.currentMediaSession.addUpdateListener(this.mediaStatusUpdateHandler);
+        connection.media = media;
+        media.addUpdateListener(connection.listeners.mediaUpdate);
     }
 
     /**
      * Callback function for media status update from receiver
      * @param {!Boolean} e true/false
      */
-    onMediaStatusUpdate(e) {
+    onMediaStatusUpdate(e, connection) {
+        if (!this.currentConnection(connection)) return;
         console.debug('[chromecastPlayer] updating media: ' + e);
         if (e === false) {
             this.castPlayerState = PLAYER_STATE.IDLE;
@@ -419,19 +633,21 @@ class CastPlayer {
      * @param {Boolean} mute A boolean
      */
     setReceiverVolume(mute, vol) {
+        const connection = this.connection;
+        if (!this.currentConnection(connection)) return;
         if (!this.currentMediaSession) {
             console.debug('this.currentMediaSession is null');
             return;
         }
 
         if (!mute) {
-            this.session.setReceiverVolumeLevel((vol || 1),
-                this.mediaCommandSuccessCallback.bind(this),
-                this.errorHandler);
+            connection.session.setReceiverVolumeLevel((vol || 1),
+                () => { if (this.currentConnection(connection)) this.mediaCommandSuccessCallback(); },
+                () => this.onError(connection.owner));
         } else {
-            this.session.setReceiverMuted(true,
-                this.mediaCommandSuccessCallback.bind(this),
-                this.errorHandler);
+            connection.session.setReceiverMuted(true,
+                () => { if (this.currentConnection(connection)) this.mediaCommandSuccessCallback(); },
+                () => this.onError(connection.owner));
         }
     }
 
@@ -518,6 +734,7 @@ function bindEventForRelay(instance, eventName) {
 
 function initializeChromecast() {
     const instance = this;
+    instance._castPlayer?.retire();
     instance._castPlayer = new CastPlayer();
 
     // To allow the native android app to override
@@ -527,11 +744,13 @@ function initializeChromecast() {
         }
     }));
 
-    Events.on(instance._castPlayer, 'connect', function () {
-        if (_currentResolve) {
-            sendConnectionResult(true);
-        } else {
-            playbackManager.setActivePlayer(PlayerName, instance.getCurrentTargetInfo());
+    Events.on(instance._castPlayer, 'connect', function (_event, connection) {
+        if (instance._castPlayer?.connection !== connection || !connection.owner.current()) return;
+        if (!instance._castPlayer.pending) {
+            if (!playbackManager.setOwnedCastPlayer(PlayerName, instance.getCurrentTargetInfo(), connection.owner, connection.selectionRevision)) {
+                instance._castPlayer.detachConnection(connection);
+                return;
+            }
         }
 
         console.debug('[chromecastPlayer] connect');
@@ -622,26 +841,22 @@ class ChromecastPlayer {
     /*
      * Cast button handling: select and connect to chromecast receiver
      */
-    tryPair() {
+    tryPair(_target, attempt) {
         const castPlayer = this._castPlayer;
 
-        if (castPlayer.deviceState !== DEVICE_STATE.ACTIVE && castPlayer.isInitialized) {
-            return new Promise(function (resolve, reject) {
-                _currentResolve = resolve;
-                _currentReject = reject;
-                castPlayer.launchApp();
-            });
-        } else {
-            _currentResolve = null;
-            _currentReject = null;
-            return Promise.reject(new Error('tryPair failed'));
-        }
+        if (!castPlayer || castPlayer.deviceState === DEVICE_STATE.ACTIVE) return Promise.reject(new Error('Cast already active'));
+        return castPlayer.pair(attempt);
+    }
+
+    getConnectionOwner() {
+        const connection = this._castPlayer?.connection;
+        return this._castPlayer?.currentConnection(connection) ? connection.owner : null;
     }
 
     getTargets() {
         const targets = [];
 
-        if (this._castPlayer?.hasReceivers) {
+        if (this._castPlayer?.hasReceivers && this._castPlayer.initializationOwner?.current()) {
             targets.push(this.getCurrentTargetInfo());
         }
 
@@ -700,15 +915,24 @@ class ChromecastPlayer {
         return data;
     }
 
-    playWithCommand(options, command) {
+    loadForConnection(options, command, castPlayer, connection) {
+        if (this._castPlayer !== castPlayer || !castPlayer?.currentConnection(connection)) {
+            return rejectedDelivery('Cast connection expired');
+        }
+        return castPlayer.loadMedia(options, command, connection);
+    }
+
+    playWithCommand(options, command, castPlayer = this._castPlayer, connection = castPlayer?.connection) {
+        if (this._castPlayer !== castPlayer || !castPlayer?.currentConnection(connection)) {
+            return rejectedDelivery('Cast connection expired');
+        }
+        if (options.serverId && options.serverId !== connection.owner.serverId) {
+            return rejectedDelivery('Cast item belongs to a different server');
+        }
         if (!options.items) {
             const apiClient = ServerConnections.getApiClient(options.serverId);
-            const instance = this;
-
-            return apiClient.getItem(apiClient.getCurrentUserId(), options.ids[0]).then(function (item) {
-                options.items = [item];
-                return instance.playWithCommand(options, command);
-            });
+            return apiClient.getItem(apiClient.getCurrentUserId(), options.ids[0]).then(item =>
+                this.playWithCommand({ ...options, items: [item] }, command, castPlayer, connection));
         }
 
         if (options.items.length > 1 && options?.ids) {
@@ -718,7 +942,7 @@ class ChromecastPlayer {
             });
         }
 
-        return this._castPlayer.loadMedia(options, command);
+        return this.loadForConnection(options, command, castPlayer, connection);
     }
 
     seek(position) {
@@ -780,43 +1004,53 @@ class ChromecastPlayer {
     }
 
     volumeDown() {
-        let vol = this._castPlayer.session.receiver.volume.level;
+        const castPlayer = this._castPlayer;
+        const connection = castPlayer?.connection;
+        if (!castPlayer?.currentConnection(connection)) return;
+        let vol = connection.session.receiver.volume.level;
         if (vol == null) {
             vol = 0.5;
         }
         vol -= 0.05;
         vol = Math.max(vol, 0);
 
-        this._castPlayer.session.setReceiverVolumeLevel(vol);
+        if (castPlayer.currentConnection(connection)) connection.session.setReceiverVolumeLevel(vol);
     }
 
     endSession() {
-        const instance = this;
-
-        this.stop().then(function () {
-            setTimeout(function () {
-                instance._castPlayer.stopApp();
+        const castPlayer = this._castPlayer;
+        const connection = castPlayer?.connection;
+        if (!castPlayer?.currentConnection(connection)) return;
+        this.stop().then(() => {
+            setTimeout(() => {
+                if (castPlayer.currentConnection(connection)) castPlayer.stopApp();
             }, 1000);
-        });
+        }).catch(() => undefined);
     }
 
     volumeUp() {
-        let vol = this._castPlayer.session.receiver.volume.level;
+        const castPlayer = this._castPlayer;
+        const connection = castPlayer?.connection;
+        if (!castPlayer?.currentConnection(connection)) return;
+        let vol = connection.session.receiver.volume.level;
         if (vol == null) {
             vol = 0.5;
         }
         vol += 0.05;
         vol = Math.min(vol, 1);
 
-        this._castPlayer.session.setReceiverVolumeLevel(vol);
+        if (castPlayer.currentConnection(connection)) connection.session.setReceiverVolumeLevel(vol);
     }
 
     setVolume(vol) {
+        const castPlayer = this._castPlayer;
+        const connection = castPlayer?.connection;
+        if (!castPlayer?.currentConnection(connection)) return;
         vol = Math.min(vol, 100);
         vol = Math.max(vol, 0);
         vol = vol / 100;
 
-        this._castPlayer.session.setReceiverVolumeLevel(vol);
+        if (castPlayer.currentConnection(connection)) connection.session.setReceiverVolumeLevel(vol);
     }
 
     unpause() {
@@ -1005,29 +1239,29 @@ class ChromecastPlayer {
     }
 
     shuffle(item) {
+        const castPlayer = this._castPlayer;
+        const connection = castPlayer?.connection;
+        if (!castPlayer?.currentConnection(connection) || connection.owner.serverId !== item.ServerId) return;
         const apiClient = ServerConnections.getApiClient(item.ServerId);
         const userId = apiClient.getCurrentUserId();
-
-        const instance = this;
-
-        apiClient.getItem(userId, item.Id).then(function (fetchedItem) {
-            instance.playWithCommand({
+        void apiClient.getItem(userId, item.Id).then(fetchedItem => {
+            void this.playWithCommand({
                 items: [fetchedItem]
-            }, 'Shuffle');
-        });
+            }, 'Shuffle', castPlayer, connection);
+        }).catch(() => undefined);
     }
 
     instantMix(item) {
+        const castPlayer = this._castPlayer;
+        const connection = castPlayer?.connection;
+        if (!castPlayer?.currentConnection(connection) || connection.owner.serverId !== item.ServerId) return;
         const apiClient = ServerConnections.getApiClient(item.ServerId);
         const userId = apiClient.getCurrentUserId();
-
-        const instance = this;
-
-        apiClient.getItem(userId, item.Id).then(function (fetchedItem) {
-            instance.playWithCommand({
+        void apiClient.getItem(userId, item.Id).then(fetchedItem => {
+            void this.playWithCommand({
                 items: [fetchedItem]
-            }, 'InstantMix');
-        });
+            }, 'InstantMix', castPlayer, connection);
+        }).catch(() => undefined);
     }
 
     canPlayMediaType(mediaType) {
@@ -1059,15 +1293,16 @@ class ChromecastPlayer {
                 throw new Error('serverId required!');
             }
 
-            const instance = this;
+            const castPlayer = this._castPlayer;
+            const connection = castPlayer?.connection;
+            if (!castPlayer?.currentConnection(connection) || connection.owner.serverId !== options.serverId) {
+                return rejectedDelivery('Cast connection expired');
+            }
             const apiClient = ServerConnections.getApiClient(options.serverId);
 
             return getItemsForPlayback(apiClient, {
                 Ids: options.ids.join(',')
-            }).then(function (result) {
-                options.items = result.Items;
-                return instance.playWithCommand(options, 'PlayNow');
-            });
+            }).then(result => this.playWithCommand({ ...options, items: result.Items }, 'PlayNow', castPlayer, connection));
         }
     }
 

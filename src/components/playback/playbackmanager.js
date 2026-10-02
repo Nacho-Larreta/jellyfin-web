@@ -33,6 +33,7 @@ import { getMediaError } from 'utils/mediaError';
 import { toApi } from 'utils/jellyfin-apiclient/compat';
 import { bindSkipSegment } from './skipsegment.ts';
 import { createPlaybackIdentity, samePlaybackIdentity } from '../htmlMediaLifecycle';
+import { createCastActivationOwner, revokeCastConnectionForLocalChoice } from './castActivationAuthority';
 
 const UNLIMITED_ITEMS = -1;
 
@@ -46,6 +47,19 @@ function enableLocalPlaylistManagement(player) {
 
 function supportsPhysicalVolumeControl(player) {
     return player.isLocalPlayer && appHost.supports(AppFeature.PhysicalVolumeControl);
+}
+
+function sameCastIdentity(left, right) {
+    return !!left && !!right && left.serverId === right.serverId
+        && left.profileUserId === right.profileUserId
+        && left.deviceId === right.deviceId
+        && left.sessionEpoch === right.sessionEpoch
+        && left.authorityRevision === right.authorityRevision
+        && left.credential.accessToken === right.credential.accessToken;
+}
+
+function sameCastAuthority(left, right) {
+    return sameCastIdentity(left, right) && left.current() && right.current();
 }
 
 function bindToFullscreenChange(player) {
@@ -724,7 +738,30 @@ export class PlaybackManager {
 
         const players = [];
         let currentTargetInfo;
-        let currentPairingId = null;
+        let currentPairing = null;
+        let currentCastConnectionOwner = null;
+        let castSelectionRevision = 0;
+        let castIntentRevision = 0;
+        const castSelectionListeners = new Set();
+        let observedCastAuthority = null;
+        let blockedCastRestoreAuthority = null;
+
+        const blockCurrentCastRestore = () => {
+            castSelectionRevision++;
+            castIntentRevision++;
+            const localChoiceOwner = createCastActivationOwner();
+            const authority = localChoiceOwner || observedCastAuthority;
+            blockedCastRestoreAuthority = authority;
+            if (authority) {
+                const intentRevision = castIntentRevision;
+                void revokeCastConnectionForLocalChoice(authority, 'Google Cast', () => (
+                    castIntentRevision === intentRevision && authority.current()
+                )).finally(() => {
+                    if (localChoiceOwner && localChoiceOwner !== observedCastAuthority) localChoiceOwner.retire();
+                });
+            }
+            for (const listener of castSelectionListeners) listener();
+        };
 
         this._playNextAfterEnded = true;
         this._profileSwitchStops = new WeakMap();
@@ -810,6 +847,8 @@ export class PlaybackManager {
 
         self.setActivePlayer = function (player, targetInfo) {
             if (player === 'localplayer' || player.name === 'localplayer') {
+                blockCurrentCastRestore();
+                cancelPairing();
                 if (self._currentPlayer?.isLocalPlayer) {
                     return;
                 }
@@ -827,15 +866,63 @@ export class PlaybackManager {
                 throw new Error('null player');
             }
 
+            if (player.name === 'Google Cast') return;
+            blockCurrentCastRestore();
+            cancelPairing();
             setCurrentPlayerInternal(player, targetInfo);
         };
 
-        self.trySetActivePlayer = function (player, targetInfo) {
+        self.getCastSelectionRevision = () => castSelectionRevision;
+
+        self.subscribeCastSelection = listener => {
+            castSelectionListeners.add(listener);
+            return () => castSelectionListeners.delete(listener);
+        };
+
+        self.observeCastRestoreAuthority = owner => {
+            observedCastAuthority = owner;
+            return castSelectionRevision;
+        };
+
+        self.canRestoreOwnedCast = (owner, selectionRevision) => !!owner?.current()
+            && selectionRevision === castSelectionRevision
+            && !sameCastIdentity(blockedCastRestoreAuthority, owner);
+
+        self.setOwnedCastPlayer = function (player, targetInfo, owner, selectionRevision) {
+            if (player !== 'Google Cast' || !self.canRestoreOwnedCast(owner, selectionRevision)) return false;
+            const castPlayer = players.find(candidate => candidate.name === player);
+            if (!castPlayer || castPlayer.getConnectionOwner?.() !== owner) return false;
+            cancelPairing();
+            setCurrentPlayerInternal(castPlayer, targetInfo, owner);
+            return true;
+        };
+
+        self.removeOwnedCastPlayer = function (owner) {
+            if (currentCastConnectionOwner !== owner) return;
+            setCurrentPlayerInternal(null);
+        };
+
+        function cancelPairing() {
+            const attempt = currentPairing;
+            if (!attempt) return;
+            currentPairing = null;
+            attempt.owner?.retire();
+            attempt.resolve(false);
+        }
+
+        self.tryRestoreActivePlayer = function (player, targetInfo, owner, selectionRevision) {
+            if (!self.canRestoreOwnedCast(owner, selectionRevision) || currentPairing && !currentPairing.automatic) {
+                owner?.retire();
+                return Promise.resolve(false);
+            }
+            return self.trySetActivePlayer(player, targetInfo, owner, selectionRevision);
+        };
+
+        self.trySetActivePlayer = function (player, targetInfo, owner, automaticSelectionRevision) {
             if (player === 'localplayer' || player.name === 'localplayer') {
-                if (self._currentPlayer?.isLocalPlayer) {
-                    return;
-                }
-                return;
+                blockCurrentCastRestore();
+                cancelPairing();
+                return Promise.resolve(false);
             }
 
             if (typeof (player) === 'string') {
@@ -848,27 +935,67 @@ export class PlaybackManager {
                 throw new Error('null player');
             }
 
-            if (currentPairingId === targetInfo.id) {
-                return;
+            const cast = player.name === 'Google Cast';
+            const automatic = automaticSelectionRevision !== undefined;
+            if (!cast) blockCurrentCastRestore();
+            if (cast && !owner) owner = createCastActivationOwner();
+            if (cast && (!owner?.current() || automatic && !self.canRestoreOwnedCast(owner, automaticSelectionRevision))) {
+                owner?.retire();
+                return Promise.resolve(false);
+            }
+            if (currentPairing?.player === player && currentPairing.targetId === targetInfo.id
+                && currentPairing.automatic === automatic
+                && (!cast && !currentPairing.owner || cast && sameCastAuthority(currentPairing.owner, owner))) {
+                if (owner && owner !== currentPairing.owner) owner.retire();
+                return currentPairing.promise;
             }
 
-            currentPairingId = targetInfo.id;
-
-            const promise = player.tryPair ?
-                player.tryPair(targetInfo) :
-                Promise.resolve();
-
-            Events.trigger(self, 'pairing');
-
-            promise.then(function () {
-                Events.trigger(self, 'paired');
-                setCurrentPlayerInternal(player, targetInfo);
-            }, function () {
-                Events.trigger(self, 'pairerror');
-                if (currentPairingId === targetInfo.id) {
-                    currentPairingId = null;
-                }
+            cancelPairing();
+            if (cast && !automatic) castIntentRevision++;
+            let resolve;
+            const result = new Promise(accept => {
+                resolve = accept;
             });
+            const attempt = { player, targetId: targetInfo.id, owner, automatic, resolve, promise: result };
+            currentPairing = attempt;
+            const active = () => currentPairing === attempt && (!owner || owner.current())
+                && (!automatic || self.canRestoreOwnedCast(owner, automaticSelectionRevision));
+            const release = owner?.onInvalidated(() => {
+                if (currentPairing === attempt) cancelPairing();
+            });
+            if (!active()) {
+                release?.();
+                return result;
+            }
+            let pairing;
+            try {
+                pairing = player.tryPair ? player.tryPair(targetInfo, attempt) : Promise.resolve();
+                if (active()) Events.trigger(self, 'pairing');
+            } catch {
+                pairing = Promise.reject(new Error('Player pairing failed'));
+            }
+            Promise.resolve(pairing).then(() => {
+                if (!active()) return;
+                const connectionOwner = cast ? player.getConnectionOwner?.() : null;
+                if (cast && connectionOwner !== owner) {
+                    currentPairing = null;
+                    owner.retire();
+                    resolve(false);
+                    return;
+                }
+                Events.trigger(self, 'paired');
+                if (!active()) return;
+                currentPairing = null;
+                setCurrentPlayerInternal(player, targetInfo, connectionOwner);
+                resolve(true);
+            }, () => {
+                if (!active()) return;
+                currentPairing = null;
+                owner?.retire();
+                Events.trigger(self, 'pairerror');
+                resolve(false);
+            }).finally(() => release?.());
+            return result;
         };
 
         self.getTargets = function () {
@@ -951,9 +1078,10 @@ export class PlaybackManager {
             }
         }
 
-        function setCurrentPlayerInternal(player, targetInfo) {
+        function setCurrentPlayerInternal(player, targetInfo, owner = null) {
             const previousPlayer = self._currentPlayer;
             const previousTargetInfo = currentTargetInfo;
+            const previousCastOwner = currentCastConnectionOwner;
 
             if (player && !targetInfo && player.isLocalPlayer) {
                 targetInfo = createTarget(self, player);
@@ -963,9 +1091,12 @@ export class PlaybackManager {
                 throw new Error('targetInfo cannot be null');
             }
 
-            currentPairingId = null;
+            if (currentPairing) cancelPairing();
             self._currentPlayer = player;
             currentTargetInfo = targetInfo;
+            currentCastConnectionOwner = player?.name === 'Google Cast' ? owner : null;
+            if (currentCastConnectionOwner) blockedCastRestoreAuthority = null;
+            if (previousCastOwner && previousCastOwner !== currentCastConnectionOwner) previousCastOwner.retire();
 
             if (targetInfo) {
                 console.debug('Active player: ' + JSON.stringify(targetInfo));

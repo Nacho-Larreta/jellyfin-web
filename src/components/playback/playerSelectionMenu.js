@@ -202,10 +202,11 @@ function showActivePlayerMenuInternal(playerInfo) {
     html += '</div>';
 
     html += '<div><label class="checkboxContainer">';
-    const checkedHtmlAC = isEnabled() ? ' checked' : '';
-    html += '<input type="checkbox" is="emby-checkbox" class="chkAutoCast"' + checkedHtmlAC + '/>';
+    html += '<input type="checkbox" is="emby-checkbox" class="chkAutoCast" disabled aria-busy="true"/>';
     html += '<span>' + globalize.translate('EnableAutoCast') + '</span>';
+    html += '<span class="autoCastStatus" role="status"></span>';
     html += '</label></div>';
+    html += '<button is="emby-button" type="button" class="btnRetryAutoCast" hidden>' + globalize.translate('Retry') + '</button>';
 
     html += '<div style="margin-top:1em;display:flex;justify-content: flex-end;">';
 
@@ -226,7 +227,44 @@ function showActivePlayerMenuInternal(playerInfo) {
     const chkAutoCast = dlg.querySelector('.chkAutoCast');
 
     if (chkAutoCast) {
-        chkAutoCast.addEventListener('change', onAutoCastChange);
+        const retry = dlg.querySelector('.btnRetryAutoCast');
+        const status = dlg.querySelector('.autoCastStatus');
+        let revision = 0;
+        const showFailure = () => {
+            status.textContent = globalize.translate('HeaderError');
+            retry.hidden = false;
+            chkAutoCast.disabled = true;
+            chkAutoCast.removeAttribute('aria-busy');
+        };
+        const refresh = async () => {
+            const current = ++revision;
+            chkAutoCast.disabled = true;
+            chkAutoCast.setAttribute('aria-busy', 'true');
+            retry.hidden = true;
+            status.textContent = '';
+            const enabled = await isEnabled();
+            if (current !== revision) return;
+            if (enabled === null) {
+                showFailure();
+            } else {
+                chkAutoCast.checked = enabled;
+                chkAutoCast.disabled = false;
+                chkAutoCast.removeAttribute('aria-busy');
+            }
+        };
+        retry.addEventListener('click', () => {
+            void refresh();
+        });
+        chkAutoCast.addEventListener('change', async () => {
+            const current = ++revision;
+            chkAutoCast.disabled = true;
+            chkAutoCast.setAttribute('aria-busy', 'true');
+            const saved = await enable(chkAutoCast.checked);
+            if (current !== revision) return;
+            if (saved) void refresh();
+            else showFailure();
+        });
+        void refresh();
     }
 
     let destination = '';
@@ -261,10 +299,6 @@ function showActivePlayerMenuInternal(playerInfo) {
 
 function onMirrorChange() {
     playbackManager.enableDisplayMirroring(this.checked);
-}
-
-function onAutoCastChange() {
-    enable(this.checked);
 }
 
 Events.on(playbackManager, 'pairing', function () {

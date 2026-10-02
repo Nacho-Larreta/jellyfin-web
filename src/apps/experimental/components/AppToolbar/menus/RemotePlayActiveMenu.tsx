@@ -9,7 +9,7 @@ import type { MenuProps } from '@mui/material/Menu';
 import MenuItem from '@mui/material/MenuItem';
 import dialog from 'components/dialog/dialog';
 import { playbackManager } from 'components/playback/playbackmanager';
-import React, { FC, useCallback, useState } from 'react';
+import React, { FC, useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { enable, isEnabled } from 'scripts/autocast';
@@ -44,11 +44,39 @@ const RemotePlayActiveMenu: FC<RemotePlayActiveMenuProps> = ({
         setIsDisplayMirrorEnabled(!isDisplayMirrorEnabled);
     }, [ isDisplayMirrorEnabled, setIsDisplayMirrorEnabled ]);
 
-    const [ isAutoCastEnabled, setIsAutoCastEnabled ] = useState(isEnabled());
-    const toggleAutoCast = useCallback(() => {
-        enable(!isAutoCastEnabled);
-        setIsAutoCastEnabled(!isAutoCastEnabled);
-    }, [ isAutoCastEnabled ]);
+    const [ autoCast, setAutoCast ] = useState<{ status: 'loading' | 'ready' | 'pending' | 'error'; enabled: boolean }>({
+        status: 'loading', enabled: false
+    });
+    const autoCastRead = useRef(0);
+    const autoCastActive = useRef(false);
+    const refreshAutoCast = useCallback(async () => {
+        const read = ++autoCastRead.current;
+        setAutoCast({ status: 'loading', enabled: false });
+        const enabled = await isEnabled();
+        if (read === autoCastRead.current && autoCastActive.current) {
+            setAutoCast(enabled === null ? { status: 'error', enabled: false } : { status: 'ready', enabled });
+        }
+    }, []);
+    useEffect(() => {
+        autoCastActive.current = open;
+        if (open) void refreshAutoCast();
+        return () => {
+            autoCastActive.current = false;
+        };
+    }, [ open, playerInfo?.id, refreshAutoCast ]);
+    const toggleAutoCast = useCallback(async () => {
+        if (autoCast.status === 'error') {
+            await refreshAutoCast();
+            return;
+        }
+        if (autoCast.status !== 'ready') return;
+        const read = autoCastRead.current;
+        setAutoCast({ ...autoCast, status: 'pending' });
+        const saved = await enable(!autoCast.enabled);
+        if (read !== autoCastRead.current || !autoCastActive.current) return;
+        if (saved) await refreshAutoCast();
+        else setAutoCast({ status: 'error', enabled: false });
+    }, [ autoCast, refreshAutoCast ]);
 
     const remotePlayerName = playerInfo?.deviceName || playerInfo?.name;
 
@@ -116,14 +144,21 @@ const RemotePlayActiveMenu: FC<RemotePlayActiveMenuProps> = ({
 
             <MenuItem
                 onClick={toggleAutoCast}
+                disabled={autoCast.status === 'loading' || autoCast.status === 'pending'}
+                role='menuitemcheckbox'
+                aria-checked={autoCast.status === 'ready' ? autoCast.enabled : false}
+                aria-busy={autoCast.status === 'loading' || autoCast.status === 'pending'}
                 sx={TOOLBAR_MENU_ITEM_SX}
             >
-                {isAutoCastEnabled && (
+                {autoCast.status === 'ready' && autoCast.enabled && (
                     <ListItemIcon>
                         <Check />
                     </ListItemIcon>
                 )}
-                <ListItemText inset={!isAutoCastEnabled}>
+                <ListItemText
+                    inset={autoCast.status !== 'ready' || !autoCast.enabled}
+                    secondary={autoCast.status === 'error' ? `${globalize.translate('HeaderError')} · ${globalize.translate('Retry')}` : undefined}
+                >
                     {globalize.translate('EnableAutoCast')}
                 </ListItemText>
             </MenuItem>
