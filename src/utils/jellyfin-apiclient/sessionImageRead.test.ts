@@ -142,6 +142,18 @@ describe('bound Home image transport', () => {
         expect(fetcher).not.toHaveBeenCalled();
     });
 
+    it('preserves aspect ratio with a bounded maximum width for automatic backdrops', async () => {
+        const fetcher = vi.fn<typeof fetch>(async () => imageResponse());
+        const { read } = setup(fetcher);
+        await read.fetchImage({ itemId, type: ImageType.Backdrop, index: 0, maxWidth: 1920 }, signal(), 1024);
+        const url = new URL(String(fetcher.mock.calls[0][0]));
+        expect(url.searchParams.get('maxWidth')).toBe('1920');
+        expect(url.searchParams.has('fillWidth')).toBe(false);
+        await expect(read.fetchImage({ itemId, type: ImageType.Backdrop, maxWidth: 5000 }, signal(), 1024))
+            .rejects.toThrow('Invalid Home image descriptor');
+        expect(fetcher).toHaveBeenCalledOnce();
+    });
+
     it('treats a redirected or failed cross-origin fetch as unavailable without retry', async () => {
         const redirected = imageResponse();
         Object.defineProperty(redirected, 'redirected', { value: true });

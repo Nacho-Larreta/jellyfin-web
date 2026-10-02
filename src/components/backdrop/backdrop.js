@@ -1,4 +1,3 @@
-import isEqual from 'lodash-es/isEqual';
 import { ServerConnections } from 'lib/jellyfin-apiclient';
 import browser from '../../scripts/browser';
 import { playbackManager } from '../playback/playbackmanager';
@@ -15,66 +14,9 @@ function enableRotation() {
     return !browser.tv;
 }
 
-class Backdrop {
-    load(url, parent) {
-        const img = new Image();
-        const self = this;
-
-        img.onload = () => {
-            if (self.isDestroyed) {
-                return;
-            }
-
-            const backdropImage = document.createElement('div');
-            backdropImage.classList.add('backdropImage');
-            backdropImage.classList.add('displayingBackdropImage');
-            backdropImage.style.backgroundImage = `url('${url}')`;
-            backdropImage.setAttribute('data-url', url);
-
-            backdropImage.classList.add('backdropImageFadeIn');
-            parent.appendChild(backdropImage);
-
-            if (!enableAnimation()) {
-                internalBackdrop(true);
-                return;
-            }
-
-            const onAnimationComplete = () => {
-                dom.removeEventListener(backdropImage, dom.whichAnimationEvent(), onAnimationComplete, {
-                    once: true
-                });
-                if (backdropImage === self.currentAnimatingElement) {
-                    self.currentAnimatingElement = null;
-                }
-            };
-
-            dom.addEventListener(backdropImage, dom.whichAnimationEvent(), onAnimationComplete, {
-                once: true
-            });
-
-            internalBackdrop(true);
-        };
-
-        img.src = url;
-    }
-
-    cancelAnimation() {
-        const elem = this.currentAnimatingElement;
-        if (elem) {
-            elem.classList.remove('backdropImageFadeIn');
-            this.currentAnimatingElement = null;
-        }
-    }
-
-    destroy() {
-        this.isDestroyed = true;
-        this.cancelAnimation();
-    }
-}
-
 let backdropContainer;
 function getBackdropContainer() {
-    if (!backdropContainer) {
+    if (!backdropContainer?.isConnected) {
         backdropContainer = document.querySelector('.backdropContainer');
     }
 
@@ -87,27 +29,9 @@ function getBackdropContainer() {
     return backdropContainer;
 }
 
-export function clearBackdrop(clearAll) {
-    clearRotation();
-
-    if (currentLoadingBackdrop) {
-        currentLoadingBackdrop.destroy();
-        currentLoadingBackdrop = null;
-    }
-
-    const elem = getBackdropContainer();
-    elem.innerHTML = '';
-
-    if (clearAll) {
-        hasExternalBackdrop = false;
-    }
-
-    internalBackdrop(false);
-}
-
 let backgroundContainer;
 function getBackgroundContainer() {
-    if (!backgroundContainer) {
+    if (!backgroundContainer?.isConnected) {
         backgroundContainer = document.querySelector('.backgroundContainer');
     }
     return backgroundContainer;
@@ -131,25 +55,6 @@ let hasExternalBackdrop;
 export function externalBackdrop(isEnabled) {
     hasExternalBackdrop = isEnabled;
     setBackgroundContainerBackgroundEnabled();
-}
-
-let currentLoadingBackdrop;
-function setBackdropImage(url) {
-    if (currentLoadingBackdrop) {
-        currentLoadingBackdrop.destroy();
-        currentLoadingBackdrop = null;
-    }
-
-    const elem = getBackdropContainer();
-    const existingBackdropImage = elem.querySelector('.displayingBackdropImage');
-    // If the current backdrop image is the same as the new one, do nothing
-    if (existingBackdropImage && existingBackdropImage.getAttribute('data-url') === url) {
-        return;
-    }
-
-    const instance = new Backdrop();
-    instance.load(url, elem);
-    currentLoadingBackdrop = instance;
 }
 
 function getItemImageUrls(item, imageOptions) {
@@ -199,9 +104,154 @@ function enabled() {
     return userSettings.enableBackdrops();
 }
 
-let rotationInterval;
-let currentRotatingImages = [];
-let currentRotationIndex = -1;
+let activeOwner;
+
+function current(owner, render = owner.render) {
+    return owner.valid && activeOwner === owner && render === owner.render;
+}
+
+function clearRender(owner) {
+    const render = owner.render;
+    if (!render) return;
+
+    owner.render = null;
+    if (render.interval) clearInterval(render.interval);
+    if (render.removalTimer) clearTimeout(render.removalTimer);
+    for (const image of render.pending) {
+        image.onload = null;
+        image.onerror = null;
+        image.src = '';
+    }
+    render.pending.clear();
+    for (const element of render.elements) element.remove();
+    render.elements.clear();
+    for (const url of render.ownedUrls) URL.revokeObjectURL(url);
+    render.ownedUrls.clear();
+}
+
+function invalidate(owner) {
+    if (!owner.valid) return;
+    owner.valid = false;
+    if (activeOwner === owner) activeOwner = null;
+    clearRender(owner);
+    if (!activeOwner) internalBackdrop(false);
+    owner.onInvalidate?.();
+}
+
+function claimOwner(assertCurrent = () => true, onInvalidate) {
+    const previous = activeOwner;
+    const owner = { valid: true, render: null, assertCurrent, onInvalidate };
+    activeOwner = owner;
+    if (previous) invalidate(previous);
+    if (activeOwner === owner) {
+        getBackdropContainer().replaceChildren();
+        internalBackdrop(false);
+    }
+    return owner;
+}
+
+function validOwner(owner) {
+    if (!current(owner)) return false;
+    try {
+        if (owner.assertCurrent() === false) throw new Error('Backdrop owner expired');
+        return true;
+    } catch {
+        invalidate(owner);
+        return false;
+    }
+}
+
+function loadImage(owner, render, url) {
+    if (!validOwner(owner) || !current(owner, render)) return;
+    const imageGeneration = ++render.imageGeneration;
+    const image = new Image();
+    render.pending.add(image);
+    image.onload = () => {
+        render.pending.delete(image);
+        if (!validOwner(owner) || !current(owner, render)
+            || imageGeneration !== render.imageGeneration) return;
+
+        const container = getBackdropContainer();
+        const existing = Array.from(render.elements).find(element => element.getAttribute('data-url') === url);
+        if (existing) return;
+
+        const element = document.createElement('div');
+        element.classList.add('backdropImage', 'displayingBackdropImage');
+        if (enableAnimation()) element.classList.add('backdropImageFadeIn');
+        element.style.backgroundImage = `url('${url}')`;
+        element.setAttribute('data-url', url);
+        container.appendChild(element);
+        render.elements.add(element);
+        internalBackdrop(true);
+
+        if (render.removalTimer) clearTimeout(render.removalTimer);
+        const oldElements = Array.from(render.elements).filter(candidate => candidate !== element);
+        render.removalTimer = setTimeout(() => {
+            render.removalTimer = null;
+            if (!validOwner(owner) || !current(owner, render)
+                || imageGeneration !== render.imageGeneration) return;
+            for (const old of oldElements) {
+                old.remove();
+                render.elements.delete(old);
+            }
+        }, 1600);
+    };
+    image.onerror = () => {
+        render.pending.delete(image);
+    };
+    image.src = url;
+}
+
+function rotate(owner, render) {
+    if (!validOwner(owner) || !current(owner, render)
+        || render.pauseForVideo && playbackManager.isPlayingLocally(['Video'])) return;
+    render.index = (render.index + 1) % render.images.length;
+    loadImage(owner, render, render.images[render.index]);
+}
+
+function renderImages(owner, images, ownedUrls = [], pauseForVideo = true) {
+    if (!validOwner(owner)) return false;
+    clearRender(owner);
+    getBackdropContainer().replaceChildren();
+    internalBackdrop(false);
+    const list = Array.isArray(images) ? images.filter(url => typeof url === 'string' && url.length) : [];
+    const render = {
+        images: list,
+        index: -1,
+        imageGeneration: 0,
+        pauseForVideo,
+        interval: null,
+        removalTimer: null,
+        pending: new Set(),
+        elements: new Set(),
+        ownedUrls: new Set(ownedUrls)
+    };
+    owner.render = render;
+    if (!list.length) return true;
+    if (list.length > 1 && enableRotation()) {
+        render.interval = setInterval(() => rotate(owner, render), 10000);
+    }
+    rotate(owner, render);
+    return true;
+}
+
+export function acquireBackdropOwner(assertCurrent, onInvalidate) {
+    const owner = claimOwner(assertCurrent, onInvalidate);
+    return Object.freeze({
+        isCurrent: () => validOwner(owner),
+        setImages: (images, ownedUrls) => renderImages(owner, images, ownedUrls),
+        clear: () => renderImages(owner, []),
+        dispose: () => invalidate(owner)
+    });
+}
+
+export function clearBackdrop(clearAll) {
+    const owner = claimOwner();
+    if (!current(owner)) return;
+    if (clearAll) hasExternalBackdrop = false;
+    internalBackdrop(false);
+}
+
 export function setBackdrops(items, imageOptions, isEnabled = false) {
     if (isEnabled || enabled()) {
         const images = getImageUrls(items, imageOptions);
@@ -215,54 +265,7 @@ export function setBackdrops(items, imageOptions, isEnabled = false) {
 }
 
 export function setBackdropImages(images) {
-    if (isEqual(images, currentRotatingImages)) {
-        return;
-    }
-
-    clearRotation();
-
-    currentRotatingImages = images;
-    currentRotationIndex = -1;
-
-    if (images.length > 1 && enableRotation()) {
-        rotationInterval = setInterval(onRotationInterval, 10000);
-    }
-
-    onRotationInterval();
-}
-
-function onRotationInterval() {
-    if (playbackManager.isPlayingLocally(['Video'])) {
-        return;
-    }
-
-    let newIndex = currentRotationIndex + 1;
-    if (newIndex >= currentRotatingImages.length) {
-        newIndex = 0;
-    }
-
-    currentRotationIndex = newIndex;
-    const currentImage = currentRotatingImages[newIndex];
-    setBackdropImage(currentImage);
-
-    // Remove old images after a delay to allow fade-in animation (800ms) to complete
-    setTimeout(() => {
-        const oldImages = getBackdropContainer().querySelectorAll(`.backdropImage:not([data-url="${currentImage}"])`);
-        oldImages.forEach(img => {
-            img.remove();
-        });
-    }, 1600);
-}
-
-function clearRotation() {
-    const interval = rotationInterval;
-    if (interval) {
-        clearInterval(interval);
-    }
-
-    rotationInterval = null;
-    currentRotatingImages = [];
-    currentRotationIndex = -1;
+    renderImages(claimOwner(), images);
 }
 
 export function setBackdrop(url, imageOptions) {
@@ -271,8 +274,7 @@ export function setBackdrop(url, imageOptions) {
     }
 
     if (url) {
-        clearRotation();
-        setBackdropImage(url);
+        renderImages(claimOwner(), [url], [], false);
     } else {
         clearBackdrop();
     }

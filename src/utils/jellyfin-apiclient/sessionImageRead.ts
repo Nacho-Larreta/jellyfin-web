@@ -12,6 +12,7 @@ export interface HomeImageDescriptor {
     readonly fillWidth?: number;
     readonly fillHeight?: number;
     readonly maxHeight?: number;
+    readonly maxWidth?: number;
     readonly quality?: number;
 }
 
@@ -35,7 +36,8 @@ function imageUrl(basePath: string, descriptor: HomeImageDescriptor): string {
         || descriptor.index !== undefined && (!Number.isSafeInteger(descriptor.index) || descriptor.index < 0)
         || descriptor.tag !== undefined && (typeof descriptor.tag !== 'string' || descriptor.tag.length > 256)
         || !validSize(descriptor.fillWidth, 1920) || !validSize(descriptor.fillHeight, 1080)
-        || !validSize(descriptor.maxHeight, 520) || !validSize(descriptor.quality, 100)) {
+        || !validSize(descriptor.maxHeight, 520) || !validSize(descriptor.maxWidth, 3840)
+        || !validSize(descriptor.quality, 100)) {
         throw new TypeError('Invalid Home image descriptor');
     }
 
@@ -46,6 +48,7 @@ function imageUrl(basePath: string, descriptor: HomeImageDescriptor): string {
         fillWidth: descriptor.fillWidth,
         fillHeight: descriptor.fillHeight,
         maxHeight: descriptor.maxHeight,
+        maxWidth: descriptor.maxWidth,
         quality: descriptor.quality
     };
     for (const [key, value] of Object.entries(fields)) {
