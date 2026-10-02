@@ -1,206 +1,26 @@
-import { BaseItemKind } from '@jellyfin/sdk/lib/generated-client/models/base-item-kind';
-import { ItemSortBy } from '@jellyfin/sdk/lib/generated-client/models/item-sort-by';
+import { CancelledError } from '@tanstack/react-query';
 
 import cardBuilder from 'components/cardbuilder/cardBuilder';
-import { getBackdropShape, getPortraitShape, getSquareShape } from 'components/cardbuilder/utils/shape';
+import { getFavoriteCardImage } from 'components/favorites/favoriteCardImage';
+import { getFavoriteSections } from 'components/favorites/favoriteSections';
+import { readFavoriteSection } from 'components/favorites/favoriteSectionRead';
+import { createHomeImageScope } from 'components/homesections/homeImageScope';
 import focusManager from 'components/focusManager';
 import layoutManager from 'components/layoutManager';
 import { appRouter } from 'components/router/appRouter';
-import dom from 'utils/dom';
+import itemShortcuts from 'components/shortcuts';
 import globalize from 'lib/globalize';
 import { ServerConnections } from 'lib/jellyfin-apiclient';
+import { getWebSessionSwitchApplication } from 'lib/profileSelector/sessionSwitch/application';
+import serverNotifications from 'scripts/serverNotifications';
+import Events from 'utils/events';
+import { createSessionImageRead } from 'utils/jellyfin-apiclient/sessionImageRead';
+import { createSessionScopedReadApi, SessionReadCancelledError } from 'utils/jellyfin-apiclient/sessionReadApi';
 
-import 'elements/emby-itemscontainer/emby-itemscontainer';
 import 'elements/emby-scroller/emby-scroller';
+import 'components/favorites/favorites.scss';
 
-function enableScrollX() {
-    return true;
-}
-
-function getSections() {
-    return [{
-        name: 'Movies',
-        types: 'Movie',
-        shape: getPortraitShape(enableScrollX()),
-        showTitle: true,
-        showYear: true,
-        overlayPlayButton: true,
-        overlayText: false,
-        centerText: true
-    }, {
-        name: 'Shows',
-        types: 'Series',
-        shape: getPortraitShape(enableScrollX()),
-        showTitle: true,
-        showYear: true,
-        overlayPlayButton: true,
-        overlayText: false,
-        centerText: true
-    }, {
-        name: 'HeaderSeasons',
-        types: BaseItemKind.Season,
-        shape: getPortraitShape(enableScrollX()),
-        showTitle: true,
-        showParentTitle: true,
-        overlayPlayButton: true,
-        overlayText: false,
-        centerText: true
-    }, {
-        name: 'Episodes',
-        types: 'Episode',
-        shape: getBackdropShape(enableScrollX()),
-        preferThumb: false,
-        showTitle: true,
-        showParentTitle: true,
-        overlayPlayButton: true,
-        overlayText: false,
-        centerText: true
-    }, {
-        name: 'HeaderVideos',
-        types: 'Video',
-        shape: getBackdropShape(enableScrollX()),
-        preferThumb: true,
-        showTitle: true,
-        overlayPlayButton: true,
-        overlayText: false,
-        centerText: true
-    }, {
-        name: 'MusicVideos',
-        types: 'MusicVideo',
-        shape: getBackdropShape(enableScrollX()),
-        preferThumb: true,
-        showTitle: true,
-        overlayPlayButton: true,
-        overlayText: false,
-        centerText: true
-    }, {
-        name: 'Collections',
-        types: 'BoxSet',
-        shape: getPortraitShape(enableScrollX()),
-        showTitle: true,
-        overlayPlayButton: true,
-        overlayText: false,
-        centerText: true
-    }, {
-        name: 'Playlists',
-        types: 'Playlist',
-        shape: getSquareShape(enableScrollX()),
-        preferThumb: false,
-        showTitle: true,
-        overlayText: false,
-        showParentTitle: false,
-        centerText: true,
-        overlayPlayButton: true,
-        coverImage: true
-    }, {
-        name: 'People',
-        types: 'Person',
-        shape: getPortraitShape(enableScrollX()),
-        preferThumb: false,
-        showTitle: true,
-        overlayText: false,
-        showParentTitle: false,
-        centerText: true,
-        overlayPlayButton: true,
-        coverImage: true
-    }, {
-        name: 'Artists',
-        types: 'MusicArtist',
-        shape: getSquareShape(enableScrollX()),
-        preferThumb: false,
-        showTitle: true,
-        overlayText: false,
-        showParentTitle: false,
-        centerText: true,
-        overlayPlayButton: true,
-        coverImage: true
-    }, {
-        name: 'Albums',
-        types: 'MusicAlbum',
-        shape: getSquareShape(enableScrollX()),
-        preferThumb: false,
-        showTitle: true,
-        overlayText: false,
-        showParentTitle: true,
-        centerText: true,
-        overlayPlayButton: true,
-        coverImage: true
-    }, {
-        name: 'Songs',
-        types: 'Audio',
-        shape: getSquareShape(enableScrollX()),
-        preferThumb: false,
-        showTitle: true,
-        overlayText: false,
-        showParentTitle: true,
-        centerText: true,
-        overlayMoreButton: true,
-        action: 'instantmix',
-        coverImage: true
-    }, {
-        name: 'Books',
-        types: 'Book',
-        shape: getPortraitShape(enableScrollX()),
-        showTitle: true,
-        showYear: true,
-        overlayPlayButton: true,
-        overlayText: false,
-        centerText: true
-    }, {
-        name: 'Channels',
-        types: 'LiveTVChannel',
-        shape: getBackdropShape(enableScrollX()),
-        showTitle: true,
-        overlayPlayButton: true,
-        overlayText: false,
-        centerText: true
-    }, {
-        name: 'HeaderPhotoAlbums',
-        types: 'PhotoAlbum',
-        shape: getBackdropShape(enableScrollX()),
-        showTitle: true,
-        overlayPlayButton: true,
-        overlayText: false,
-        centerText: true
-    }, {
-        name: 'Photos',
-        types: 'Photo',
-        shape: getBackdropShape(enableScrollX()),
-        showTitle: true,
-        overlayPlayButton: true,
-        overlayText: false,
-        centerText: true
-    }];
-}
-
-function getFetchDataFn(section) {
-    return function () {
-        const apiClient = this.apiClient;
-        const options = {
-            SortBy: [ItemSortBy.SeriesSortName, ItemSortBy.SortName].join(','),
-            SortOrder: 'Ascending',
-            Filters: 'IsFavorite',
-            Recursive: true,
-            Fields: 'PrimaryImageAspectRatio',
-            CollapseBoxSetItems: false,
-            ExcludeLocationTypes: 'Virtual',
-            EnableTotalRecordCount: false
-        };
-        options.Limit = 20;
-        const userId = apiClient.getCurrentUserId();
-
-        if (section.types === 'MusicArtist') {
-            return apiClient.getArtists(userId, options);
-        }
-
-        if (section.types === 'Person') {
-            return apiClient.getPeople(userId, options);
-        }
-
-        options.IncludeItemTypes = section.types;
-        return apiClient.getItems(userId, options);
-    };
-}
+const FAVORITES_READ_TIMEOUT_MS = 12000;
 
 function getRouteUrl(section, serverId) {
     return appRouter.getRouteUrl('list', {
@@ -210,56 +30,59 @@ function getRouteUrl(section, serverId) {
     });
 }
 
-function getItemsHtmlFn(section) {
-    return function (items) {
-        // NOTE: Why is card layout always disabled?
-        // let cardLayout = appHost.preferVisualCards && section.autoCardLayout && section.showTitle;
-        const cardLayout = false;
-        const serverId = this.apiClient.serverId();
-        const leadingButtons = layoutManager.tv ? [{
-            name: globalize.translate('All'),
-            id: 'more',
-            icon: 'favorite',
-            routeUrl: getRouteUrl(section, serverId)
-        }] : null;
-        let lines = 0;
+function renderCards(section, items, serverId) {
+    const cardLayout = false;
+    const leadingButtons = layoutManager.tv ? [{
+        name: globalize.translate('All'),
+        id: 'more',
+        icon: 'favorite',
+        routeUrl: getRouteUrl(section, serverId)
+    }] : null;
+    let lines = 0;
 
-        if (section.showTitle) {
-            lines++;
-        }
+    if (section.showTitle) {
+        lines++;
+    }
 
-        if (section.showYear) {
-            lines++;
-        }
+    if (section.showYear) {
+        lines++;
+    }
 
-        if (section.showParentTitle) {
-            lines++;
-        }
+    if (section.showParentTitle) {
+        lines++;
+    }
 
-        return cardBuilder.getCardsHtml({
-            items: items,
-            preferThumb: section.preferThumb,
-            shape: section.shape,
-            centerText: section.centerText && !cardLayout,
-            overlayText: section.overlayText !== false,
-            showTitle: section.showTitle,
-            showYear: section.showYear,
-            showParentTitle: section.showParentTitle,
-            scalable: true,
-            coverImage: section.coverImage,
-            overlayPlayButton: section.overlayPlayButton,
-            overlayMoreButton: section.overlayMoreButton && !cardLayout,
-            action: section.action,
-            allowBottomPadding: !enableScrollX(),
-            cardLayout: cardLayout,
-            leadingButtons: leadingButtons,
-            lines: lines
-        });
-    };
+    const descriptors = new Map();
+    const html = cardBuilder.getCardsHtml({
+        items: items,
+        serverId: serverId,
+        imagePresentation: (item, shape, index) => {
+            const presentation = getFavoriteCardImage(item, shape, section);
+            if (presentation.descriptor) descriptors.set(index, presentation.descriptor);
+            return presentation;
+        },
+        preferThumb: section.preferThumb,
+        shape: section.shape,
+        centerText: section.centerText && !cardLayout,
+        overlayText: section.overlayText !== false,
+        showTitle: section.showTitle,
+        showYear: section.showYear,
+        showParentTitle: section.showParentTitle,
+        scalable: true,
+        coverImage: section.coverImage,
+        overlayPlayButton: section.overlayPlayButton,
+        overlayMoreButton: section.overlayMoreButton && !cardLayout,
+        action: section.action,
+        allowBottomPadding: false,
+        cardLayout: cardLayout,
+        leadingButtons: leadingButtons,
+        lines: lines
+    });
+    return { html, descriptors };
 }
 
-function createSections(instance, elem, apiClient) {
-    const sections = getSections();
+function createSections(elem, serverId) {
+    const sections = getFavoriteSections();
     let html = '';
 
     for (const section of sections) {
@@ -275,7 +98,7 @@ function createSections(instance, elem, apiClient) {
         if (layoutManager.tv) {
             html += '<h2 class="sectionTitle sectionTitle-cards">' + globalize.translate(section.name) + '</h2>';
         } else {
-            html += '<a is="emby-linkbutton" href="' + getRouteUrl(section, apiClient.serverId()) + '" class="more button-flat button-flat-mini sectionTitleTextButton">';
+            html += '<a is="emby-linkbutton" href="' + getRouteUrl(section, serverId) + '" class="more button-flat button-flat-mini sectionTitleTextButton">';
             html += '<h2 class="sectionTitle sectionTitle-cards">';
             html += globalize.translate(section.name);
             html += '</h2>';
@@ -284,70 +107,308 @@ function createSections(instance, elem, apiClient) {
         }
 
         html += '</div>';
-        html += '<div is="emby-scroller" class="padded-top-focusscale padded-bottom-focusscale" data-centerfocus="true"><div is="emby-itemscontainer" class="itemsContainer scrollSlider focuscontainer-x" data-monitor="markfavorite"></div></div>';
+        html += '<div is="emby-scroller" class="padded-top-focusscale padded-bottom-focusscale" data-centerfocus="true"><div class="itemsContainer scrollSlider focuscontainer-x"></div></div>';
         html += '</div>';
     }
 
     elem.innerHTML = html;
     window.CustomElements.upgradeSubtree(elem);
 
-    const elems = elem.querySelectorAll('.itemsContainer');
-
-    for (let i = 0, length = elems.length; i < length; i++) {
-        const itemsContainer = elems[i];
-        itemsContainer.fetchData = getFetchDataFn(sections[i]).bind(instance);
-        itemsContainer.getItemsHtml = getItemsHtmlFn(sections[i]).bind(instance);
-        itemsContainer.parentContainer = dom.parentWithClass(itemsContainer, 'verticalSection');
-    }
+    return Array.from(elem.querySelectorAll('.verticalSection')).map((element, index) => ({
+        section: sections[index],
+        element,
+        items: element.querySelector('.itemsContainer')
+    }));
 }
 
 class FavoritesTab {
-    constructor(view, params) {
+    constructor(view) {
         this.view = view;
-        this.params = params;
-        this.apiClient = ServerConnections.currentApiClient();
         this.sectionsContainer = view.querySelector('.sections');
-        createSections(this, this.sectionsContainer, this.apiClient);
+        this.generation = 0;
+        this.refreshGeneration = 0;
+        this.paused = true;
+        this.sections = [];
+        this.read = null;
+        this.assertCurrent = null;
+        this.client = null;
+        this.port = null;
+        this.imageScope = null;
+        this.abortController = null;
+        this.refreshTimer = null;
+        this.unsubscribeAuthority = null;
+        this.authorityHandler = null;
+        this.notificationHandler = null;
+        this.clickHandler = null;
+        this.commandGuard = null;
     }
 
-    onResume(options) {
-        const promises = [];
-        const view = this.view;
-        const elems = this.sectionsContainer.querySelectorAll('.itemsContainer');
-
-        for (const elem of elems) {
-            promises.push(elem.resume(options));
+    onResume(options = {}) {
+        this.onPause();
+        const generation = ++this.generation;
+        this.paused = false;
+        const client = ServerConnections.currentApiClient();
+        let port;
+        try {
+            port = client && getWebSessionSwitchApplication(ServerConnections).captureBoundSessionRead(client);
+        } catch {
+            port = null;
+        }
+        if (!client || !port) {
+            this.setStatus('ErrorDefault');
+            return Promise.resolve();
         }
 
-        Promise.all(promises).then(function () {
-            if (options.autoFocus) {
-                focusManager.autoFocus(view);
+        let read;
+        try {
+            read = createSessionScopedReadApi(client, port);
+        } catch {
+            this.onPause();
+            this.setStatus('ErrorDefault');
+            return Promise.resolve();
+        }
+        this.read = read;
+        this.client = client;
+        this.port = port;
+        const assertCurrent = () => {
+            if (this.paused || this.generation !== generation || !this.view?.isConnected
+                || !this.view.contains(this.sectionsContainer) || this.read !== read) {
+                throw new SessionReadCancelledError();
             }
+            read.assertCurrent();
+        };
+        this.assertCurrent = assertCurrent;
+        const verifyAuthority = () => {
+            try {
+                assertCurrent();
+            } catch {
+                if (this.generation === generation) this.onPause();
+            }
+        };
+        this.unsubscribeAuthority = ServerConnections.subscribeSessionSwitchEnvelope(read.identity.serverId, verifyAuthority);
+        this.authorityHandler = verifyAuthority;
+        for (const event of ['localusersignedin', 'localusersignedout', 'sessionswitchcompleted']) {
+            Events.on(ServerConnections, event, verifyAuthority);
+        }
+        this.notificationHandler = (_event, eventClient) => {
+            if (eventClient !== client) return;
+            try {
+                assertCurrent();
+                this.scheduleRefresh(generation);
+            } catch {
+                verifyAuthority();
+            }
+        };
+        Events.on(serverNotifications, 'UserDataChanged', this.notificationHandler);
+        try {
+            assertCurrent();
+        } catch {
+            this.onPause();
+            return Promise.resolve();
+        }
+        this.setStatus('MessagePleaseWait');
+        const userController = new window['AbortController']();
+        this.abortController = userController;
+        let userTimeout;
+        const userRead = Promise.race([
+            read.getCurrentUser(userController.signal),
+            new Promise((_, reject) => {
+                userTimeout = setTimeout(() => {
+                    userController.abort();
+                    reject(new Error('Favorites user read timed out'));
+                }, FAVORITES_READ_TIMEOUT_MS);
+            })
+        ]).finally(() => clearTimeout(userTimeout));
+        return userRead.then(user => {
+            assertCurrent();
+            if (!user?.Id || user.Id !== read.identity.profileUserId) {
+                this.onPause();
+                throw new SessionReadCancelledError();
+            }
+            const sections = createSections(this.sectionsContainer, read.identity.serverId);
+            assertCurrent();
+            this.sections = sections;
+            this.clickHandler = event => {
+                try {
+                    assertCurrent();
+                    const container = event.currentTarget;
+                    if (container.contains(event.target)) itemShortcuts.onClick.call(container, event);
+                } catch {
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                    verifyAuthority();
+                }
+            };
+            this.commandGuard = event => {
+                try {
+                    assertCurrent();
+                } catch {
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                    verifyAuthority();
+                }
+            };
+            for (const { items } of this.sections) {
+                items.addEventListener('click', this.clickHandler, true);
+                items.addEventListener('command', this.commandGuard, true);
+                itemShortcuts.on(items, { click: false });
+            }
+            return this.refresh(generation, assertCurrent, client, port).then(() => {
+                assertCurrent();
+                if (options.autoFocus) focusManager.autoFocus(this.view);
+            });
+        }).catch(error => {
+            if (this.generation !== generation || this.read !== read) return;
+            this.onPause();
+            if (!(error instanceof CancelledError)) this.setStatus('ErrorDefault');
         });
     }
 
     onPause() {
-        if (this.sectionsContainer) {
-            Array.from(this.sectionsContainer.querySelectorAll('.itemsContainer'))
-                .forEach(e => { e.pause(); });
+        this.generation++;
+        this.refreshGeneration++;
+        this.paused = true;
+        this.abortController?.abort();
+        this.abortController = null;
+        if (this.refreshTimer) clearTimeout(this.refreshTimer);
+        this.refreshTimer = null;
+        this.unsubscribeAuthority?.();
+        this.unsubscribeAuthority = null;
+        if (this.authorityHandler) {
+            for (const event of ['localusersignedin', 'localusersignedout', 'sessionswitchcompleted']) {
+                Events.off(ServerConnections, event, this.authorityHandler);
+            }
+            this.authorityHandler = null;
         }
+        if (this.notificationHandler) Events.off(serverNotifications, 'UserDataChanged', this.notificationHandler);
+        this.notificationHandler = null;
+        for (const { items } of this.sections) {
+            if (this.clickHandler) items.removeEventListener('click', this.clickHandler, true);
+            if (this.commandGuard) items.removeEventListener('command', this.commandGuard, true);
+            itemShortcuts.off(items, { click: false });
+        }
+        this.clickHandler = null;
+        this.commandGuard = null;
+        this.sections = [];
+        this.imageScope?.dispose();
+        this.imageScope = null;
+        this.read = null;
+        this.assertCurrent = null;
+        this.client = null;
+        this.port = null;
+        this.sectionsContainer?.replaceChildren();
     }
 
     destroy() {
-        this.view = null;
-        this.params = null;
-        this.apiClient = null;
-        const elems = this.sectionsContainer.querySelectorAll('.itemsContainer');
-
-        for (const elem of elems) {
-            elem.fetchData = null;
-            elem.getItemsHtml = null;
-            elem.parentContainer = null;
-        }
-
+        this.onPause();
         this.sectionsContainer = null;
+        this.view = null;
+    }
+
+    setStatus(key) {
+        if (!this.view?.isConnected || !this.view.contains(this.sectionsContainer)) return;
+        this.sectionsContainer.querySelector('.favoriteSectionsStatus')?.remove();
+        const status = document.createElement('p');
+        status.className = 'favoriteSectionsStatus padded-left';
+        status.setAttribute('role', 'status');
+        status.textContent = globalize.translate(key);
+        if (!this.sections.length) this.sectionsContainer.replaceChildren(status);
+        else this.sectionsContainer.appendChild(status);
+    }
+
+    scheduleRefresh(generation) {
+        if (this.refreshTimer) return;
+        this.refreshTimer = setTimeout(() => {
+            this.refreshTimer = null;
+            if (this.paused || this.generation !== generation || !this.read || !this.assertCurrent) return;
+            const client = this.client;
+            const port = this.port;
+            if (!client || !port || client !== ServerConnections.currentApiClient()) {
+                this.onPause();
+                return;
+            }
+            const assertCurrent = this.assertCurrent;
+            void this.refresh(generation, assertCurrent, client, port).catch(() => {
+                if (this.generation === generation) this.onPause();
+            });
+        }, 100);
+    }
+
+    async refresh(generation, assertCurrent, client, port) {
+        assertCurrent();
+        this.abortController?.abort();
+        this.imageScope?.dispose();
+        const refreshGeneration = ++this.refreshGeneration;
+        const controller = new window['AbortController']();
+        this.abortController = controller;
+        const imageScope = createHomeImageScope(this.sectionsContainer, createSessionImageRead(client, port));
+        this.imageScope = imageScope;
+        this.sectionsContainer.querySelector('.favoriteSectionsStatus')?.remove();
+        const focusedId = this.view.contains(document.activeElement) ?
+            document.activeElement.closest('[data-id]')?.getAttribute('data-id') : null;
+        const results = this.sections.map(() => ({ status: 'rejected' }));
+        const reads = this.sections.map(async ({ section }, index) => {
+            try {
+                const value = await readFavoriteSection(this.read, section.types, controller.signal);
+                results[index] = { status: 'fulfilled', value };
+            } catch {
+                results[index] = { status: 'rejected' };
+            }
+        });
+        let timeoutId;
+        let timedOut = false;
+        await Promise.race([
+            Promise.all(reads),
+            new Promise(resolve => {
+                timeoutId = setTimeout(() => {
+                    timedOut = true;
+                    controller.abort();
+                    resolve();
+                }, FAVORITES_READ_TIMEOUT_MS);
+            })
+        ]);
+        clearTimeout(timeoutId);
+        if (controller.signal.aborted && !timedOut || this.refreshGeneration !== refreshGeneration || this.generation !== generation) return;
+        assertCurrent();
+        let failed = 0;
+        let visible = 0;
+        for (const [index, result] of results.entries()) {
+            const { section, element, items } = this.sections[index];
+            if (result.status === 'rejected') {
+                failed++;
+                element.classList.add('hide');
+                items.replaceChildren();
+                continue;
+            }
+            if (!result.value.length) {
+                element.classList.add('hide');
+                items.replaceChildren();
+                continue;
+            }
+            const serverId = this.read.identity.serverId;
+            const itemsForServer = result.value.map(item => ({ ...item, ServerId: serverId }));
+            const { html, descriptors } = renderCards(section, itemsForServer, serverId);
+            assertCurrent();
+            items.innerHTML = html;
+            assertCurrent();
+            element.classList.remove('hide');
+            visible++;
+            for (const image of items.querySelectorAll('img[data-session-image-slot]')) {
+                assertCurrent();
+                const descriptor = descriptors.get(Number(image.dataset.sessionImageSlot));
+                if (descriptor) imageScope.add(image, descriptor, () => image.remove());
+            }
+        }
+        assertCurrent();
+        if (failed) this.setStatus('ErrorDefault');
+        else if (!visible) this.setStatus('MessageNoFavoritesAvailable');
+        if (focusedId) {
+            const matching = Array.from(this.sectionsContainer.querySelectorAll('[data-id]'))
+                .find(element => element.getAttribute('data-id') === focusedId);
+            if (matching) focusManager.focus(matching);
+            else if (visible) focusManager.autoFocus(this.sectionsContainer);
+        }
     }
 }
 
 export default FavoritesTab;
-

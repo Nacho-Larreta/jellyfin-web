@@ -162,7 +162,7 @@ function buildCardsHtmlInternal(items, options) {
     for (const [i, item] of items.entries()) {
         const serverId = item.ServerId || options.serverId;
 
-        if (serverId !== lastServerId) {
+        if (options.imagePresentation === undefined && serverId !== lastServerId) {
             lastServerId = serverId;
             apiClient = ServerConnections.getApiClient(lastServerId);
         }
@@ -746,8 +746,25 @@ function buildCard(index, item, apiClient, options) {
 
     // TODO move card creation code to Card component
 
-    const imgInfo = getCardImageUrl({ api: toApi(apiClient), item, options, shape });
+    let sessionImage = null;
+    let imgInfo;
+    if (options.imagePresentation !== undefined) {
+        const candidate = typeof options.imagePresentation === 'function' ?
+            options.imagePresentation(item, shape, index) : null;
+        sessionImage = candidate && typeof candidate === 'object' ? {
+            descriptor: candidate.descriptor,
+            blurhash: candidate.blurhash,
+            forceName: candidate.forceName,
+            coverImage: candidate.coverImage
+        } : {};
+        imgInfo = sessionImage;
+    } else {
+        imgInfo = getCardImageUrl({ api: toApi(apiClient), item, options, shape });
+    }
     const imgUrl = imgInfo.imgUrl;
+    const hasImage = Boolean(imgUrl || sessionImage?.descriptor);
+    let imageClassSource = imgUrl;
+    if (sessionImage) imageClassSource = hasImage ? 'session-image' : undefined;
     const blurhash = imgInfo.blurhash;
     const forceName = imgInfo.forceName;
     const overlayText = options.overlayText;
@@ -756,7 +773,7 @@ function buildCard(index, item, apiClient, options) {
         itemType: item.Type,
         itemName: item.Name,
         hasCoverImage: options.coverImage || imgInfo.coverImage,
-        imgUrl
+        imgUrl: imageClassSource
     });
 
     let footerCssClass;
@@ -858,7 +875,18 @@ function buildCard(index, item, apiClient, options) {
         blurhashAttrib = 'data-blurhash="' + blurhash + '"';
     }
 
-    if (layoutManager.tv) {
+    if (sessionImage?.descriptor) {
+        const content = '<img class="favoriteSessionImage" data-session-image-slot="' + index + '" alt="" loading="lazy">';
+        if (layoutManager.tv) {
+            cardImageContainerOpen = '<div class="' + cardImageContainerClasses + ' ' + cardContentClass + '">' + content;
+            cardImageContainerClose = '</div>';
+        } else {
+            const url = appRouter.getRouteUrl(item);
+            const ariaLabel = ` aria-label="${escapeHtml(item.Name || '')}"`;
+            cardImageContainerOpen = '<a href="' + url + '" data-action="' + action + '" class="' + cardImageContainerClasses + ' ' + cardContentClass + ' itemAction"' + ariaLabel + '>' + content;
+            cardImageContainerClose = '</a>';
+        }
+    } else if (layoutManager.tv) {
         // Don't use the IMG tag with safari because it puts a white border around it
         cardImageContainerOpen = imgUrl ? ('<div class="' + cardImageContainerClasses + ' ' + cardContentClass + ' lazy" data-src="' + imgUrl + '" ' + blurhashAttrib + '>') : ('<div class="' + cardImageContainerClasses + ' ' + cardContentClass + '">');
 
@@ -878,7 +906,7 @@ function buildCard(index, item, apiClient, options) {
     let cardPadderIcon = '';
 
     // TV Channel logos are transparent so skip the placeholder to avoid overlapping
-    if (imgUrl && item.Type !== 'TvChannel') {
+    if (hasImage && item.Type !== 'TvChannel') {
         cardPadderIcon = getDefaultText(item, {
             // Always use an icon
             defaultCardImageIcon: 'folder',
@@ -921,7 +949,7 @@ function buildCard(index, item, apiClient, options) {
         }
     }
 
-    if (!imgUrl) {
+    if (!hasImage || sessionImage) {
         cardImageContainerOpen += getDefaultText(item, options);
     }
 
