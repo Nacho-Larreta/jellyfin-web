@@ -10,6 +10,8 @@ $mui-bp-xl: 1536px;
 }
 
 .jellyflixToolbarNav {
+    padding: var(--jf-semantic-space-2);
+
     .MuiButton-root {
         color: rgba(255, 255, 255, 0.72);
         min-width: auto;
@@ -47,6 +49,12 @@ $mui-bp-xl: 1536px;
     .MuiButton-root.jellyflixToolbarNavItemActive {
         color: #fff;
         font-weight: 700;
+    }
+
+    > .MuiButton-root:focus-visible:not(.Mui-disabled) {
+        outline: var(--jf-semantic-space-1) solid var(--jf-semantic-focus-indicator) !important;
+        outline-offset: calc(var(--jf-semantic-space-1) / 2);
+        box-shadow: 0 0 0 calc(var(--jf-semantic-space-1) + var(--jf-semantic-space-1) / 2) var(--jf-semantic-focus-separator);
     }
 }
 
