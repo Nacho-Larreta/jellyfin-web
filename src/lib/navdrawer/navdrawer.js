@@ -29,13 +29,17 @@ class NavDrawer {
     menuTouchStartX;
     menuTouchStartY;
     menuTouchStartTime;
-    edgeContainer = document.querySelector('.mainDrawerHandle');
+    edgeContainer;
     isPeeking = false;
     backgroundTouchStartX;
     backgroundTouchStartTime;
     _edgeSwipeEnabled;
 
     constructor(options) {
+        if (options.edgeContainer !== undefined && !(options.edgeContainer instanceof HTMLElement)) {
+            throw new TypeError('edgeContainer must be an HTMLElement');
+        }
+        this.edgeContainer = options.edgeContainer ?? document.querySelector('.mainDrawerHandle');
         this.options = options;
         this.defaults = {
             width: 260,
@@ -370,4 +374,3 @@ class NavDrawer {
 }
 
 export default NavDrawer;
-

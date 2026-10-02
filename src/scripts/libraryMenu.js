@@ -35,8 +35,14 @@ import '../elements/emby-button/paper-icon-button-light';
 import 'material-design-icons-iconfont';
 import '../styles/scrollstyles.scss';
 import '../styles/flexstyles.scss';
+import { bindHeaderTabs, clearHeaderTabs } from '../components/maintabsmanager';
 
-function renderHeader() {
+function isCurrentMount(mount) {
+    return mount && activeHeaderMount === mount && mount.header.isConnected;
+}
+
+function renderHeader(mount) {
+    if (!isCurrentMount(mount)) return;
     let html = '';
     html += '<div class="flex align-items-center flex-grow headerTop">';
     html += '<div class="headerLeft">';
@@ -65,8 +71,8 @@ function renderHeader() {
     skinHeader.classList.add('skinHeader-withBackground');
     skinHeader.classList.add('skinHeader-blurred');
     skinHeader.innerHTML = html;
-
-    Events.trigger(document, EventType.HEADER_RENDERED);
+    mount.tabsContainer = skinHeader.querySelector('.headerTabs');
+    bindHeaderTabs(mount.tabsContainer);
 
     headerBackButton = skinHeader.querySelector('.headerBackButton');
     headerHomeButton = skinHeader.querySelector('.headerHomeButton');
@@ -80,10 +86,11 @@ function renderHeader() {
     currentTimeText = skinHeader.querySelector('.currentTimeText');
 
     retranslateUi();
-    lazyLoadViewMenuBarImages();
-    bindMenuEvents();
+    lazyLoadViewMenuBarImages(mount);
+    bindMenuEvents(mount);
     updateCastIcon();
-    updateClock();
+    updateClock(mount);
+    Events.trigger(document, EventType.HEADER_RENDERED);
 }
 
 function getCurrentApiClient() {
@@ -94,9 +101,9 @@ function getCurrentApiClient() {
     return ServerConnections.currentApiClient();
 }
 
-function lazyLoadViewMenuBarImages() {
+function lazyLoadViewMenuBarImages(mount) {
     import('../components/images/imageLoader').then((imageLoader) => {
-        imageLoader.lazyChildren(skinHeader);
+        if (isCurrentMount(mount)) imageLoader.lazyChildren(mount.header);
     });
 }
 
@@ -138,7 +145,8 @@ function retranslateUi() {
     }
 }
 
-function updateUserInHeader(user) {
+function updateUserInHeader(user, mount = activeHeaderMount) {
+    if (!isCurrentMount(mount)) return;
     retranslateUi();
 
     let hasImage;
@@ -157,7 +165,7 @@ function updateUserInHeader(user) {
 
     if (!hasImage) {
         updateHeaderUserButton(null, user?.name);
-        updateHeaderUserButtonGradient(user);
+        updateHeaderUserButtonGradient(user, mount);
     }
 
     if (user?.localUser) {
@@ -207,7 +215,7 @@ function getHeaderUserId(user) {
         || getCurrentApiClient()?.getCurrentUserId?.();
 }
 
-function updateHeaderUserButtonGradient(user) {
+function updateHeaderUserButtonGradient(user, mount) {
     const requestId = ++headerUserButtonGradientRequestId;
     const apiClient = getCurrentApiClient();
     const userId = getHeaderUserId(user);
@@ -217,14 +225,14 @@ function updateHeaderUserButtonGradient(user) {
     }
 
     getCurrentProfileSelector(apiClient).then(selector => {
-        if (requestId !== headerUserButtonGradientRequestId || !headerUserButton) {
+        if (!isCurrentMount(mount) || requestId !== headerUserButtonGradientRequestId || !headerUserButton) {
             return;
         }
 
         const gradient = getProfileAvatarGradientForUser(selector, userId);
         headerUserButton.style.background = gradient || '';
     }).catch(() => {
-        if (requestId === headerUserButtonGradientRequestId && headerUserButton) {
+        if (isCurrentMount(mount) && requestId === headerUserButtonGradientRequestId && headerUserButton) {
             headerUserButton.style.background = '';
         }
     });
@@ -243,12 +251,13 @@ function updateHeaderUserButton(src, name) {
     }
 }
 
-function updateClock() {
+function updateClock(mount) {
     if (layoutManager.tv) {
         currentTimeText.classList.remove('hide');
-        setInterval(function() {
-            currentTimeText.innerText = datetime.getDisplayTime(new Date());
+        mount.clock = setInterval(function() {
+            if (isCurrentMount(mount)) mount.clockElement.innerText = datetime.getDisplayTime(new Date());
         }, 1000);
+        mount.clockElement = currentTimeText;
     } else {
         currentTimeText.classList.add('hide');
     }
@@ -270,38 +279,41 @@ function showAudioPlayer() {
     return appRouter.showNowPlaying();
 }
 
-function bindMenuEvents() {
+function bindMenuEvents(mount) {
+    const bind = (element, event, callback) => {
+        element?.addEventListener(event, callback);
+        if (element) mount.listeners.push(() => element.removeEventListener(event, callback));
+    };
     if (mainDrawerButton) {
-        mainDrawerButton.addEventListener('click', toggleMainDrawer);
+        bind(mainDrawerButton, 'click', toggleMainDrawer);
     }
 
     if (headerBackButton) {
-        headerBackButton.addEventListener('click', onBackClick);
+        bind(headerBackButton, 'click', onBackClick);
     }
 
     if (headerSearchButton) {
-        headerSearchButton.addEventListener('click', showSearch);
+        bind(headerSearchButton, 'click', showSearch);
     }
 
-    headerUserButton.addEventListener('click', onHeaderUserButtonClick);
-    headerHomeButton.addEventListener('click', onHeaderHomeButtonClick);
-    jellyflixHeaderBrandButton.addEventListener('click', onHeaderHomeButtonClick);
+    bind(headerUserButton, 'click', onHeaderUserButtonClick);
+    bind(headerHomeButton, 'click', onHeaderHomeButtonClick);
+    bind(jellyflixHeaderBrandButton, 'click', onHeaderHomeButtonClick);
 
     if (!layoutManager.tv) {
-        headerCastButton.addEventListener('click', onCastButtonClicked);
+        bind(headerCastButton, 'click', onCastButtonClicked);
     }
 
-    headerAudioPlayerButton.addEventListener('click', showAudioPlayer);
-    headerSyncButton.addEventListener('click', onSyncButtonClicked);
+    bind(headerAudioPlayerButton, 'click', showAudioPlayer);
+    bind(headerSyncButton, 'click', onSyncButtonClicked);
 
     if (layoutManager.mobile) {
-        initHeadRoom(skinHeader);
+        mount.headroom = initHeadRoom(skinHeader);
     }
-    Events.on(playbackManager, 'playbackstart', onPlaybackStart);
-    Events.on(playbackManager, 'playbackstop', onPlaybackStop);
 }
 
 function onPlaybackStart() {
+    if (!isCurrentMount(activeHeaderMount)) return;
     if (playbackManager.isPlayingAudio() && layoutManager.tv) {
         headerAudioPlayerButton.classList.remove('hide');
     } else {
@@ -310,6 +322,7 @@ function onPlaybackStart() {
 }
 
 function onPlaybackStop(e, stopInfo) {
+    if (!isCurrentMount(activeHeaderMount)) return;
     if (stopInfo.nextMediaType != 'Audio') {
         headerAudioPlayerButton.classList.add('hide');
     }
@@ -335,6 +348,7 @@ function getItemHref(item, context) {
 }
 
 function toggleMainDrawer() {
+    if (!navDrawerInstance || !isCurrentMount(activeHeaderMount)) return;
     if (navDrawerInstance.isVisible) {
         closeMainDrawer();
     } else {
@@ -343,7 +357,7 @@ function toggleMainDrawer() {
 }
 
 function openMainDrawer() {
-    navDrawerInstance.open();
+    navDrawerInstance?.open();
 }
 
 function onMainDrawerOpened() {
@@ -353,7 +367,7 @@ function onMainDrawerOpened() {
 }
 
 function closeMainDrawer() {
-    navDrawerInstance.close();
+    navDrawerInstance?.close();
 }
 
 function onMainDrawerSelect() {
@@ -507,7 +521,12 @@ function getTopParentId() {
 
 function onMainDrawerClick(e) {
     if (dom.parentWithTag(e.target, 'A')) {
-        setTimeout(closeMainDrawer, 30);
+        const mount = activeHeaderMount;
+        const timeout = setTimeout(() => {
+            mount?.timeouts.delete(timeout);
+            if (isCurrentMount(mount)) closeMainDrawer();
+        }, 30);
+        mount?.timeouts.add(timeout);
     }
 }
 
@@ -532,6 +551,7 @@ function onLogoutClick() {
 }
 
 function updateCastIcon() {
+    if (!isCurrentMount(activeHeaderMount) || !headerCastButton) return;
     const context = document;
     const info = playbackManager.getPlayerInfo();
     const icon = headerCastButton.querySelector('.material-icons');
@@ -580,6 +600,7 @@ function updateLibraryNavLinks(page) {
 }
 
 function updateMenuForPageType(isDashboardPage, isLibraryPage) {
+    if (!isCurrentMount(activeHeaderMount)) return;
     let newPageType = 3;
     if (isDashboardPage) {
         newPageType = 2;
@@ -623,7 +644,7 @@ function updateMenuForPageType(isDashboardPage, isLibraryPage) {
     }
 
     if (requiresUserRefresh) {
-        ServerConnections.user(getCurrentApiClient()).then(updateUserInHeader);
+        refreshHeaderUser(activeHeaderMount);
     }
 }
 
@@ -650,6 +671,7 @@ function updateBackButton(page) {
 function initHeadRoom(elem) {
     const headroom = new Headroom(elem);
     headroom.init();
+    return headroom;
 }
 
 const libraryMenuViews = createLibraryMenuViews({
@@ -660,8 +682,9 @@ const libraryMenuViews = createLibraryMenuViews({
         return port && createSessionScopedReadApi(client, port);
     },
     prepareDrawer: async () => {
-        await loadNavDrawer();
-        return navDrawerScrollContainer;
+        const mount = activeHeaderMount;
+        await loadNavDrawer(mount);
+        return isCurrentMount(mount) ? navDrawerScrollContainer : null;
     },
     currentDrawer: () => navDrawerScrollContainer,
     clear: clearLibraryDrawer,
@@ -692,39 +715,38 @@ function refreshLibraryDrawer() {
     });
 }
 
-function getNavDrawerOptions() {
+function getNavDrawerOptions(mount) {
     let drawerWidth = window.screen.availWidth - 50;
     drawerWidth = Math.max(drawerWidth, 240);
     drawerWidth = Math.min(drawerWidth, 320);
     return {
-        target: navDrawerElement,
-        onChange: onMainDrawerSelect,
+        target: mount.drawer,
+        edgeContainer: mount.handle,
+        onChange: () => {
+            if (isCurrentMount(mount)) onMainDrawerSelect();
+        },
         width: drawerWidth
     };
 }
 
-function loadNavDrawer() {
-    if (navDrawerInstance) {
-        return Promise.resolve(navDrawerInstance);
-    }
-
-    navDrawerElement = document.querySelector('.mainDrawer');
-    navDrawerScrollContainer = navDrawerElement.querySelector('.scrollContainer');
-    navDrawerScrollContainer.addEventListener('click', onMainDrawerClick);
-    return new Promise(function (resolve) {
-        import('../lib/navdrawer/navdrawer').then(({ default: NavDrawer }) => {
-            navDrawerInstance = new NavDrawer(getNavDrawerOptions());
-
-            if (!layoutManager.tv) {
-                navDrawerElement.classList.remove('hide');
-            }
-
-            resolve(navDrawerInstance);
-        });
+function loadNavDrawer(mount) {
+    if (!isCurrentMount(mount)) return Promise.resolve(null);
+    if (mount.drawerPromise) return mount.drawerPromise;
+    mount.drawerPromise = import('../lib/navdrawer/navdrawer').then(({ default: NavDrawer }) => {
+        if (!isCurrentMount(mount)) return null;
+        navDrawerScrollContainer = mount.drawer.querySelector('.scrollContainer');
+        const scrollContainer = navDrawerScrollContainer;
+        scrollContainer.addEventListener('click', onMainDrawerClick);
+        mount.listeners.push(() => scrollContainer.removeEventListener('click', onMainDrawerClick));
+        navDrawerInstance = new NavDrawer(getNavDrawerOptions(mount));
+        mount.drawerInstance = navDrawerInstance;
+        if (!layoutManager.tv) mount.drawer.classList.remove('hide');
+        return navDrawerInstance;
     });
+    return mount.drawerPromise;
 }
 
-let navDrawerElement;
+let activeHeaderMount;
 let navDrawerScrollContainer;
 let navDrawerInstance;
 let mainDrawerButton;
@@ -743,13 +765,123 @@ let headerSyncButton;
 let currentTimeText;
 const enableLibraryNavDrawer = layoutManager.desktop;
 const enableLibraryNavDrawerHome = !layoutManager.tv;
-const skinHeader = document.querySelector('.skinHeader');
+let skinHeader;
 let requiresUserRefresh = true;
 
+function refreshHeaderUser(mount) {
+    if (!isCurrentMount(mount)) return;
+    const client = ServerConnections.currentApiClient();
+    if (!client) return;
+    let read;
+    try {
+        const port = getWebSessionSwitchApplication(ServerConnections).captureBoundSessionRead(client);
+        if (!port) return;
+        read = createSessionScopedReadApi(client, port);
+    } catch {
+        return;
+    }
+    void read.getCurrentUser().then(user => {
+        if (!isCurrentMount(mount) || ServerConnections.currentApiClient() !== client) return;
+        try {
+            read.assertCurrent();
+        } catch {
+            return;
+        }
+        currentUser = {
+            localUser: user,
+            name: user.Name,
+            imageUrl: user.PrimaryImageTag ? client.getUserImageUrl(user.Id, {
+                tag: user.PrimaryImageTag,
+                type: 'Primary'
+            }) : null
+        };
+        updateUserInHeader(currentUser, mount);
+    }).catch(() => undefined);
+}
+
+function unmountHeader(mount) {
+    if (activeHeaderMount !== mount) return;
+    activeHeaderMount = null;
+    clearHeaderTabs(mount.tabsContainer);
+    headerUserButtonGradientRequestId++;
+    libraryDrawerRefreshGeneration++;
+    libraryMenuViews.invalidate();
+    for (const timeout of mount.timeouts) clearTimeout(timeout);
+    mount.timeouts.clear();
+    for (const removeListener of mount.listeners) removeListener();
+    mount.listeners.length = 0;
+    if (mount.clock) clearInterval(mount.clock);
+    mount.headroom?.destroy();
+    if (mount.drawerInstance) {
+        mount.drawerInstance.setEdgeSwipeEnabled(false);
+        mount.drawerInstance.close();
+        mount.drawerInstance.mask?.remove();
+    }
+    document.body.classList.remove('bodyWithPopupOpen');
+    navDrawerInstance = null;
+    navDrawerScrollContainer = null;
+    skinHeader = null;
+    pageTitleElement = null;
+    headerBackButton = null;
+    headerHomeButton = null;
+    headerUserButton = null;
+    headerCastButton = null;
+    headerAudioPlayerButton = null;
+    headerSearchButton = null;
+    headerSyncButton = null;
+    jellyflixHeaderBrandButton = null;
+    mainDrawerButton = null;
+    currentTimeText = null;
+    currentPageType = null;
+    currentDrawerType = null;
+    currentUser = null;
+    requiresUserRefresh = true;
+}
+
+function releaseHeader(mount) {
+    if (activeHeaderMount !== mount) return;
+    mount.owners--;
+    if (mount.owners === 0) unmountHeader(mount);
+}
+
+function ownHeaderMount(mount) {
+    let released = false;
+    return () => {
+        if (released) return;
+        released = true;
+        releaseHeader(mount);
+    };
+}
+
+export function mountHeader(header, drawer, handle) {
+    if (activeHeaderMount?.header === header && activeHeaderMount.drawer === drawer && activeHeaderMount.handle === handle) {
+        const mounted = activeHeaderMount;
+        mounted.owners++;
+        return ownHeaderMount(mounted);
+    }
+    if (activeHeaderMount) unmountHeader(activeHeaderMount);
+    const mount = {
+        header, drawer, handle,
+        owners: 1,
+        listeners: [], timeouts: new Set(),
+        drawerInstance: null, headroom: null, clock: null
+    };
+    activeHeaderMount = mount;
+    skinHeader = header;
+    renderHeader(mount);
+    void loadNavDrawer(mount);
+    refreshHeaderUser(mount);
+    refreshLibraryDrawer();
+    return ownHeaderMount(mount);
+}
+
 function setTabs (type, selectedIndex, builder) {
+    const mount = activeHeaderMount;
+    if (!isCurrentMount(mount)) return;
     Events.trigger(document, EventType.SET_TABS, type ? [ type, selectedIndex, builder()] : []);
 
     import('../components/maintabsmanager').then((mainTabsManager) => {
+        if (!isCurrentMount(mount)) return;
         if (type) {
             mainTabsManager.setTabs(viewManager.currentView(), selectedIndex, builder, function () {
                 return [];
@@ -818,6 +950,7 @@ function setTitle (title) {
 }
 
 function setTransparentMenu (transparent) {
+    if (!isCurrentMount(activeHeaderMount)) return;
     if (transparent) {
         skinHeader.classList.add('semiTransparent');
     } else {
@@ -827,12 +960,14 @@ function setTransparentMenu (transparent) {
 
 let currentPageType;
 pageClassOn('pagebeforeshow', 'page', function () {
+    if (!isCurrentMount(activeHeaderMount)) return;
     if (!this.classList.contains('withTabs')) {
         LibraryMenu.setTabs(null);
     }
 });
 
 pageClassOn('pageshow', 'page', function (e) {
+    if (!isCurrentMount(activeHeaderMount)) return;
     const page = this;
     const isDashboardPage = page.classList.contains('type-interior');
     const isHomePage = page.classList.contains('homePage');
@@ -873,35 +1008,35 @@ Events.on(ServerConnections, 'localusersignedin', function (e, user) {
 
     libraryMenuViews.invalidate();
     currentDrawerType = null;
-    currentUser = {
-        localUser: user
-    };
-
-    refreshLibraryDrawer();
-
-    ServerConnections.user(currentApiClient).then(function (userResult) {
-        currentUser = userResult;
-        updateUserInHeader(userResult);
-    });
+    if (currentApiClient !== ServerConnections.currentApiClient()) return;
+    currentUser = { localUser: user };
+    if (isCurrentMount(activeHeaderMount)) {
+        refreshLibraryDrawer();
+        refreshHeaderUser(activeHeaderMount);
+    }
 });
 
 Events.on(ServerConnections, 'localusersignedout', function () {
     libraryMenuViews.invalidate();
     currentDrawerType = null;
     currentUser = {};
-    updateUserInHeader();
+    if (isCurrentMount(activeHeaderMount)) updateUserInHeader();
 });
 
 Events.on(ServerConnections, 'sessionswitchcompleted', function () {
     libraryMenuViews.invalidate();
     currentDrawerType = null;
-    refreshLibraryDrawer();
+    if (isCurrentMount(activeHeaderMount)) {
+        refreshLibraryDrawer();
+        refreshHeaderUser(activeHeaderMount);
+    }
 });
 
 Events.on(playbackManager, 'playerchange', updateCastIcon);
+Events.on(playbackManager, 'playbackstart', onPlaybackStart);
+Events.on(playbackManager, 'playbackstop', onPlaybackStop);
 
 fetchServerName(getCurrentApiClient());
-loadNavDrawer();
 
 const LibraryMenu = {
     getTopParentId,
@@ -915,6 +1050,5 @@ const LibraryMenu = {
 };
 
 window.LibraryMenu = LibraryMenu;
-renderHeader();
 
 export default LibraryMenu;

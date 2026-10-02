@@ -5,13 +5,32 @@ import '../elements/emby-tabs/emby-tabs';
 import '../elements/emby-button/emby-button';
 
 let tabOwnerView;
-const queryScope = document.querySelector('.skinHeader');
 let headerTabsContainer;
 let tabsElem;
+let managedHeaderTabsContainer;
+
+export function bindHeaderTabs(container) {
+    managedHeaderTabsContainer = container;
+    ensureElements();
+}
+
+export function clearHeaderTabs(container) {
+    if (managedHeaderTabsContainer !== container) return;
+    container.innerHTML = '';
+    container.classList.add('hide');
+    document.body.classList.remove('withSectionTabs');
+    managedHeaderTabsContainer = null;
+    ensureElements();
+}
 
 function ensureElements() {
-    if (!headerTabsContainer) {
-        headerTabsContainer = queryScope.querySelector('.headerTabs');
+    const currentContainer = managedHeaderTabsContainer === undefined ?
+        document.querySelector('.skinHeader .headerTabs') :
+        managedHeaderTabsContainer;
+    if (headerTabsContainer !== currentContainer) {
+        headerTabsContainer = currentContainer;
+        tabOwnerView = null;
+        tabsElem = null;
     }
 }
 
@@ -77,6 +96,10 @@ function configureSwipeTabs(view, currentElement) {
 
 export function setTabs(view, selectedIndex, getTabsFn, getTabContainersFn, onBeforeTabChange, onTabChange, setSelectedIndex) {
     ensureElements();
+
+    if (!headerTabsContainer) {
+        return { tabsContainer: null, replaced: false };
+    }
 
     if (!view) {
         if (tabOwnerView) {

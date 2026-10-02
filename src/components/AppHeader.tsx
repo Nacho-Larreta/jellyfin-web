@@ -1,4 +1,4 @@
-import React, { FC, useEffect } from 'react';
+import React, { FC, useEffect, useRef } from 'react';
 
 interface AppHeaderParams {
     isHidden?: boolean
@@ -7,9 +7,22 @@ interface AppHeaderParams {
 const AppHeader: FC<AppHeaderParams> = ({
     isHidden = false
 }) => {
+    const header = useRef<HTMLDivElement>(null);
+    const drawer = useRef<HTMLDivElement>(null);
+    const drawerHandle = useRef<HTMLDivElement>(null);
+
     useEffect(() => {
-        // Initialize the UI components after first render
-        void import('../scripts/libraryMenu');
+        let active = true;
+        let unmount: (() => void) | undefined;
+        void import('../scripts/libraryMenu').then(({ mountHeader }) => {
+            if (active && header.current && drawer.current && drawerHandle.current) {
+                unmount = mountHeader(header.current, drawer.current, drawerHandle.current);
+            }
+        });
+        return () => {
+            active = false;
+            unmount?.();
+        };
     }, []);
 
     return (
@@ -18,11 +31,11 @@ const AppHeader: FC<AppHeaderParams> = ({
          * directly so they need to be present in the DOM. We use display: none to hide them and prevent errors.
          */
         <div style={isHidden ? { display: 'none' } : undefined}>
-            <div className='mainDrawer hide'>
+            <div ref={drawer} className='mainDrawer hide'>
                 <div className='mainDrawer-scrollContainer scrollContainer focuscontainer-y' />
             </div>
-            <div className='skinHeader focuscontainer-x' />
-            <div className='mainDrawerHandle' />
+            <div ref={header} className='skinHeader focuscontainer-x' />
+            <div ref={drawerHandle} className='mainDrawerHandle' />
         </div>
     );
 };
