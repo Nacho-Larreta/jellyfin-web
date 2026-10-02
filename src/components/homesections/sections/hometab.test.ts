@@ -33,7 +33,7 @@ import { ServerConnections } from 'lib/jellyfin-apiclient';
 import { getWebSessionSwitchApplication } from 'lib/profileSelector/sessionSwitch/application';
 import { createSessionScopedReadApi } from 'utils/jellyfin-apiclient/sessionReadApi';
 
-import HomeTab from './hometab';
+import HomeTab from '../../../controllers/hometab';
 
 function deferred<T>() {
     let resolve!: (value: T) => void;

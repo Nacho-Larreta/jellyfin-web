@@ -6,12 +6,14 @@ import { describe, expect, it } from 'vitest';
 
 const fromWorkspace = (file: string) => path.resolve(process.cwd(), file);
 
-describe('Home route styles', () => {
+describe('Home route stylesheet dependency', () => {
     it('loads bounded Home styles without importing the legacy Home sections controller', () => {
         const entry = fs.readFileSync(fromWorkspace('src/controllers/hometab.js'), 'utf8');
 
         expect(entry).toContain("import '../components/homesections/homesections.scss';");
         expect(entry).not.toMatch(/from ['"](?:\.\.\/)?components\/homesections\/homesections['"]/);
+        expect(fs.existsSync(fromWorkspace('src/controllers/hometab.styles.test.ts'))).toBe(false);
+        expect(fs.existsSync(fromWorkspace('src/controllers/hometab.test.ts'))).toBe(false);
 
         const css = postcss.parse(compile(fromWorkspace('src/components/homesections/homesections.scss')).css);
         const rails: Rule[] = [];
