@@ -1,17 +1,16 @@
-import { Api } from '@jellyfin/sdk';
 import { CollectionType } from '@jellyfin/sdk/lib/generated-client/models/collection-type';
 import { useQuery } from '@tanstack/react-query';
-import { AxiosRequestConfig } from 'axios';
 import { useApi } from 'hooks/useApi';
+import { type SessionScopedReadApi } from 'utils/jellyfin-apiclient/sessionReadApi';
 import { BaseItemKind } from '@jellyfin/sdk/lib/generated-client/models/base-item-kind';
 import { ItemsApiGetItemsRequest } from '@jellyfin/sdk/lib/generated-client/api/items-api';
 import { fetchItemsByType } from './fetchItemsByType';
 
 const fetchPrograms = async (
-    api: Api,
+    api: SessionScopedReadApi,
     userId: string,
     params?: ItemsApiGetItemsRequest,
-    options?: AxiosRequestConfig
+    options?: { signal?: AbortSignal }
 ) => {
     const response = await fetchItemsByType(
         api,
@@ -31,20 +30,18 @@ export const useProgramsSearch = (
     collectionType?: CollectionType,
     searchTerm?: string
 ) => {
-    const { api, user } = useApi();
+    const { sessionScopedReadApi, sessionQueryIdentity, user } = useApi();
+    const api = sessionScopedReadApi;
     const userId = user?.Id;
 
     return useQuery({
-        queryKey: ['Search', 'Programs', collectionType, parentId, searchTerm],
-        queryFn: ({ signal }) => fetchPrograms(
-            api!,
-            userId!,
-            {
-                parentId,
-                searchTerm
-            },
-            { signal }
-        ),
-        enabled: !!api && !!userId && !collectionType
+        queryKey: ['Search', sessionQueryIdentity, 'Programs', collectionType, parentId, searchTerm],
+        queryFn: async ({ signal }) => {
+            const result = await fetchPrograms(api!, userId!, { parentId, searchTerm }, { signal });
+            sessionScopedReadApi!.assertCurrent();
+            return result;
+        },
+        enabled: !!api && !!sessionQueryIdentity && userId === sessionQueryIdentity.profileUserId
+            && !collectionType
     });
 };

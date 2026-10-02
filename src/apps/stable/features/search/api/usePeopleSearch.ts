@@ -1,28 +1,25 @@
-import { Api } from '@jellyfin/sdk';
 import { CollectionType } from '@jellyfin/sdk/lib/generated-client/models/collection-type';
 import { useQuery } from '@tanstack/react-query';
-import { AxiosRequestConfig } from 'axios';
 import { useApi } from 'hooks/useApi';
+import { type SessionScopedReadApi } from 'utils/jellyfin-apiclient/sessionReadApi';
 import { QUERY_OPTIONS } from '../constants/queryOptions';
 import { isMovies, isTVShows } from '../utils/search';
 import { PersonsApiGetPersonsRequest } from '@jellyfin/sdk/lib/generated-client/api/persons-api';
-import { getPersonsApi } from '@jellyfin/sdk/lib/utils/api/persons-api';
 
 const fetchPeople = async (
-    api: Api,
+    api: SessionScopedReadApi,
     userId: string,
     params?: PersonsApiGetPersonsRequest,
-    options?: AxiosRequestConfig
+    options?: { signal?: AbortSignal }
 ) => {
-    const response = await getPersonsApi(api).getPersons(
+    return api.getPersons(
         {
             ...QUERY_OPTIONS,
             userId,
             ...params
         },
-        options
+        options?.signal
     );
-    return response.data;
 };
 
 export const usePeopleSearch = (
@@ -30,21 +27,20 @@ export const usePeopleSearch = (
     collectionType?: CollectionType,
     searchTerm?: string
 ) => {
-    const { api, user } = useApi();
+    const { sessionScopedReadApi, sessionQueryIdentity, user } = useApi();
+    const api = sessionScopedReadApi;
     const userId = user?.Id;
 
     const isPeopleEnabled = (!collectionType || isMovies(collectionType) || isTVShows(collectionType));
 
     return useQuery({
-        queryKey: ['Search', 'People', collectionType, parentId, searchTerm],
-        queryFn: ({ signal }) => fetchPeople(
-            api!,
-            userId!,
-            {
-                searchTerm
-            },
-            { signal }
-        ),
-        enabled: !!api && !!userId && isPeopleEnabled
+        queryKey: ['Search', sessionQueryIdentity, 'People', collectionType, parentId, searchTerm],
+        queryFn: async ({ signal }) => {
+            const result = await fetchPeople(api!, userId!, { searchTerm }, { signal });
+            sessionScopedReadApi!.assertCurrent();
+            return result;
+        },
+        enabled: !!api && !!sessionQueryIdentity && userId === sessionQueryIdentity.profileUserId
+            && isPeopleEnabled
     });
 };

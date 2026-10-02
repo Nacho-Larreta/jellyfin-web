@@ -1,7 +1,7 @@
-import { Api } from '@jellyfin/sdk';
 import { CollectionType } from '@jellyfin/sdk/lib/generated-client/models/collection-type';
 import { useQuery } from '@tanstack/react-query';
 import { useApi } from 'hooks/useApi';
+import { type SessionScopedReadApi } from 'utils/jellyfin-apiclient/sessionReadApi';
 import { addSection, isLivetv } from '../utils/search';
 import { BaseItemKind } from '@jellyfin/sdk/lib/generated-client/models/base-item-kind';
 import { LIVETV_CARD_OPTIONS } from '../constants/liveTvCardOptions';
@@ -9,7 +9,7 @@ import { CardShape } from 'components/cardbuilder/utils/shape';
 import { Section } from '../types';
 import { fetchItemsByType } from './fetchItemsByType';
 
-const fetchLiveTv = (api: Api, userId: string | undefined, searchTerm: string | undefined, signal: AbortSignal) => {
+const fetchLiveTv = (api: SessionScopedReadApi, userId: string | undefined, searchTerm: string | undefined, signal: AbortSignal) => {
     const sections: Section[] = [];
 
     // Movies row
@@ -138,13 +138,18 @@ export const useLiveTvSearch = (
     collectionType?: CollectionType,
     searchTerm?: string
 ) => {
-    const { api, user } = useApi();
+    const { sessionScopedReadApi, sessionQueryIdentity, user } = useApi();
+    const api = sessionScopedReadApi;
     const userId = user?.Id;
 
     return useQuery({
-        queryKey: ['Search', 'LiveTv', collectionType, parentId, searchTerm],
-        queryFn: ({ signal }) =>
-            fetchLiveTv(api!, userId!, searchTerm, signal),
-        enabled: !!api && !!userId && !!collectionType && !!isLivetv(collectionType)
+        queryKey: ['Search', sessionQueryIdentity, 'LiveTv', collectionType, parentId, searchTerm],
+        queryFn: async ({ signal }) => {
+            const sections = await fetchLiveTv(api!, userId!, searchTerm, signal);
+            sessionScopedReadApi!.assertCurrent();
+            return sections;
+        },
+        enabled: !!api && !!sessionQueryIdentity && userId === sessionQueryIdentity.profileUserId
+            && !!collectionType && !!isLivetv(collectionType)
     });
 };

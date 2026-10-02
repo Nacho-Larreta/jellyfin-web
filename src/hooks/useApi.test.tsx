@@ -14,7 +14,7 @@ import { queryClient } from 'utils/query/queryClient';
 
 import { ApiProvider, useApi } from './useApi';
 
-const routeBootstrap = vi.hoisted(() => ({ prepare: vi.fn() }));
+const routeBootstrap = vi.hoisted(() => ({ prepare: vi.fn(), capture: vi.fn() }));
 
 vi.mock('lib/jellyfin-apiclient', () => ({
     ConnectionState: {
@@ -45,7 +45,8 @@ vi.mock('components/viewManager/viewManager', () => ({ default: { hideView: vi.f
 vi.mock('lib/globalize', () => ({ default: { translate: (key: string) => key } }));
 vi.mock('lib/profileSelector/sessionSwitch/application', () => ({
     getWebSessionSwitchApplication: () => ({
-        prepareProtectedRoute: routeBootstrap.prepare
+        prepareProtectedRoute: routeBootstrap.prepare,
+        captureBoundSessionRead: routeBootstrap.capture
     })
 }));
 vi.mock('scripts/shell', () => ({ default: { openUrl: vi.fn() } }));
@@ -99,6 +100,10 @@ function oldSessionEnvelope(): SessionSwitchEnvelope {
 
 function apiClient(userId: string, token: string, serverId = 'server-1') {
     return {
+        appName: () => 'Web',
+        appVersion: () => '1',
+        deviceName: () => 'Browser',
+        deviceId: () => 'device-1',
         accessToken: () => token,
         getCurrentUser: vi.fn(async () => ({ Id: userId, ServerId: serverId })),
         getCurrentUserId: () => userId,
@@ -143,6 +148,11 @@ function Snapshot() {
     return <div>{user?.Id || 'no-user'}:{Reflect.get(api || {}, 'token') || 'no-token'}</div>;
 }
 
+function ReadSnapshot() {
+    const { api, sessionScopedReadApi, sessionQueryIdentity } = useApi();
+    return <div>{Reflect.get(api || {}, 'token')}:{sessionScopedReadApi ? sessionQueryIdentity?.sessionEpoch : 'no-read'}</div>;
+}
+
 async function mount(reloadPage?: () => void, content: React.ReactNode = <Snapshot />) {
     container = document.createElement('div');
     document.body.append(container);
@@ -182,6 +192,8 @@ beforeEach(() => {
         return () => subscribers.delete(listener);
     });
     routeBootstrap.prepare.mockReset();
+    routeBootstrap.capture.mockReset();
+    routeBootstrap.capture.mockReturnValue(null);
     routeBootstrap.prepare.mockImplementation(async () => {
         if (envelope?.marker) throw new Error('Pending durable session switch');
         return { selector: null, activeSession: envelope?.activeSession || null };
@@ -199,6 +211,54 @@ afterEach(async () => {
 });
 
 describe('ApiProvider session completion', () => {
+    it('keeps the anonymous provider empty while a public server route resolves', async () => {
+        connections.currentApiClient.mockImplementation(() => undefined);
+        connections.connect.mockResolvedValue({ State: 'ServerSelection' });
+        await mount(undefined, (
+            <MemoryRouter initialEntries={[ '/selectserver' ]}>
+                <Routes>
+                    <Route element={<ConnectionRequired level='public' />}>
+                        <Route path='/selectserver' element={<div>Server selection <Snapshot /></div>} />
+                    </Route>
+                </Routes>
+            </MemoryRouter>
+        ));
+
+        expect(container.textContent).toContain('Server selection no-user:no-token');
+        expect(routeBootstrap.capture).not.toHaveBeenCalled();
+    });
+
+    it('shows connection unavailable only when anonymous connect reports it', async () => {
+        connections.currentApiClient.mockImplementation(() => undefined);
+        connections.connect.mockResolvedValue({ State: 'Unavailable' });
+        await mount(undefined, (
+            <MemoryRouter initialEntries={[ '/selectserver' ]}>
+                <Routes>
+                    <Route element={<ConnectionRequired level='public' />}>
+                        <Route path='/selectserver' element={<div>Server selection</div>} />
+                    </Route>
+                </Routes>
+            </MemoryRouter>
+        ));
+
+        expect(container.textContent).toContain('HeaderServerUnavailable');
+        expect(routeBootstrap.capture).not.toHaveBeenCalled();
+    });
+
+    it('publishes the bound Search read beside the ordinary API', async () => {
+        const active = oldSessionEnvelope().activeSession;
+        routeBootstrap.capture.mockReturnValue({
+            binding: active,
+            basePath: 'https://jellyfin.example',
+            identity: { serverId: active.serverId, profileUserId: active.profileUserId, sessionEpoch: active.sessionEpoch, authorityGeneration: 4 },
+            assertCurrent: vi.fn(),
+            acquire: vi.fn()
+        });
+        await mount(undefined, <ReadSnapshot />);
+        expect(container.textContent).toBe('old-token:0');
+        expect(routeBootstrap.capture).toHaveBeenCalledWith(oldClient);
+    });
+
     it('hides old actions until the matching durable completion and rebuilds SDK auth', async () => {
         await mount();
         expect(container.textContent).toBe('old-user:old-token');

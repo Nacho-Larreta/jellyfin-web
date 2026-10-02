@@ -292,6 +292,24 @@ export class ServerConnections extends ConnectionManager {
         return this.sessionCredentialProvider.credentials().Servers.find(server => server.Id === serverId) || null;
     }
 
+    readFreshSessionAuthority(serverId) {
+        const server = this.readFreshCredentials().Servers.find(candidate => candidate.Id === serverId);
+        if (!server) return null;
+
+        const authorityRevision = readSessionAuthorityRevision(server);
+        const envelope = server.SessionSwitchEnvelope == null ? null : JSON.parse(JSON.stringify(server.SessionSwitchEnvelope));
+        if (envelope !== null) assertSessionEnvelope(envelope);
+
+        return {
+            serverId,
+            userId: server.UserId ?? null,
+            accessToken: server.AccessToken ?? null,
+            selectorEnabled: server.ProfileSelectorEnabled,
+            authorityRevision,
+            envelope
+        };
+    }
+
     updateSavedServer(serverId, updater, options = {}) {
         return this.withSessionEnvelopeLock(serverId, () => {
             const previousCredentials = this.readFreshCredentials();

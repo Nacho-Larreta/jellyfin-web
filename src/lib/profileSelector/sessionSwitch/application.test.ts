@@ -23,6 +23,8 @@ function createApiClient(selector: Record<string, unknown>, userId = 'owner-user
         getCurrentUserId: () => currentUserId,
         getJSON: vi.fn().mockResolvedValue(selector),
         getUrl: (path: string) => `/api/${path}`,
+        serverAddress: () => 'https://jellyfin.example/api',
+        deviceId: () => 'device-1',
         serverId: () => 'server-1',
         install(user: string, accessToken: string) {
             currentUserId = user;
@@ -54,10 +56,19 @@ function createConnections(initial: SessionSwitchEnvelope | null, apiClient: Ret
         }),
         clearInstalledSession: vi.fn(),
         discardStagedSession: vi.fn(),
+        currentApiClient: vi.fn(() => apiClient),
         getApiClient: vi.fn(() => apiClient),
         getInstalledSessionUser: vi.fn(() => apiClient.getCurrentUser()),
         getSessionDeviceId: () => 'device-1',
         getSessionSwitchEnvelope: vi.fn(() => envelope === null ? null : cloneEnvelope(envelope)),
+        readFreshSessionAuthority: vi.fn(() => ({
+            serverId: 'server-1',
+            userId: apiClient.getCurrentUserId(),
+            accessToken: apiClient.accessToken(),
+            selectorEnabled: true,
+            authorityRevision: 1,
+            envelope: envelope === null ? null : cloneEnvelope(envelope)
+        })),
         installSessionAuthentication: vi.fn(session => {
             apiClient.install(session.profileUserId, session.credentialRef.token);
         }),
@@ -100,6 +111,75 @@ const enabledSecondarySelector = {
     OwnerUserId: 'owner-user',
     Profiles: []
 };
+
+describe('WebSessionSwitchApplication bound reads', () => {
+    it('synchronizes an existing durable envelope before its first read admission', () => {
+        const client = createApiClient(enabledOwnerSelector);
+        const active = createActiveProfileSession('server-1', 'device-1', 'owner-user', 'owner-token', 3);
+        const connections = createConnections(createSessionSwitchEnvelope(active), client);
+        const application = new WebSessionSwitchApplication(connections);
+
+        const port = application.captureBoundSessionRead(client);
+        expect(port?.identity).toEqual({
+            serverId: 'server-1', profileUserId: 'owner-user', sessionEpoch: 3,
+            authorityGeneration: expect.stringMatching(/^1:[0-9a-f]{32}$/)
+        });
+        const lease = port!.acquire();
+        expect(lease.signal.aborted).toBe(false);
+        lease.settle();
+    });
+
+    it('denies missing and marked envelopes, and an observation during the fresh read', async () => {
+        const client = createApiClient(enabledOwnerSelector);
+        const connections = createConnections(null, client);
+        const application = new WebSessionSwitchApplication(connections);
+        expect(application.captureBoundSessionRead(client)).toBeNull();
+
+        const active = createActiveProfileSession('server-1', 'device-1', 'owner-user', 'owner-token', 1);
+        const stored = createSessionSwitchEnvelope(active);
+        const marked: SessionSwitchEnvelope = {
+            ...stored,
+            revision: 1,
+            marker: {
+                kind: 'PendingSwitch', phase: 'Preparing', switchId: 'switch-1',
+                serverId: 'server-1', deviceId: 'device-1', oldProfileUserId: 'owner-user',
+                oldEpoch: 1, targetProfileUserId: 'other-user', coordinatorId: 'coordinator-1',
+                fencingToken: 1, leaseExpiresAtMs: 1000, updatedAtMs: 0
+            }
+        };
+        const fresh = {
+            serverId: 'server-1', userId: 'owner-user', accessToken: 'owner-token',
+            selectorEnabled: true, authorityRevision: 1, envelope: stored
+        };
+        connections.readFreshSessionAuthority.mockImplementationOnce(() => {
+            void connections.replaceSessionSwitchEnvelope('server-1', 0, marked);
+            return fresh;
+        });
+        expect(application.captureBoundSessionRead(client)).toBeNull();
+        expect(connections.replaceSessionSwitchEnvelope).toHaveBeenCalledTimes(1);
+        expect(application.captureBoundSessionRead(client)).toBeNull();
+    });
+
+    it('permits explicit selector-disabled authority and fences replacement', () => {
+        const client = createApiClient(enabledOwnerSelector);
+        const connections = createConnections(null, client);
+        connections.readFreshSessionAuthority.mockImplementation(() => ({
+            serverId: 'server-1', userId: client.getCurrentUserId(), accessToken: client.accessToken(),
+            selectorEnabled: false, authorityRevision: 4, envelope: null
+        }));
+        const application = new WebSessionSwitchApplication(connections);
+        const port = application.captureBoundSessionRead(client);
+        expect(port?.identity.sessionEpoch).toBe(0);
+        const lease = port!.acquire();
+        lease.settle();
+
+        client.install('replacement-user', 'replacement-token');
+        expect(port!.assertCurrent).toThrow();
+        expect(application.captureBoundSessionRead(client)).not.toBeNull();
+        client.install('', '');
+        expect(application.captureBoundSessionRead(client)).toBeNull();
+    });
+});
 
 describe('WebSessionSwitchApplication bootstrap', () => {
     it('stops a login bootstrap before its first envelope write when authority is revoked during selector fetch', async () => {

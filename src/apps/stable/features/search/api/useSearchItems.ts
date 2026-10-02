@@ -67,7 +67,8 @@ export const useSearchItems = (
     const { data: videos, isPending: isVideosPending } = useVideoSearch(parentId, collectionType, auxiliarySearchTerm);
     const { data: programs, isPending: isProgramsPending } = useProgramsSearch(parentId, collectionType, auxiliarySearchTerm);
     const { data: liveTvSections, isPending: isLiveTvPending } = useLiveTvSearch(parentId, collectionType, auxiliarySearchTerm);
-    const { api, user } = useApi();
+    const { sessionScopedReadApi, sessionQueryIdentity, user } = useApi();
+    const api = sessionScopedReadApi;
     const userId = user?.Id;
 
     const isArtistsEnabled = isAuxiliarySearchReady(hasGenreFilter, isArtistsPending, collectionType, collectionType ? !isMusic(collectionType) : false);
@@ -82,10 +83,11 @@ export const useSearchItems = (
     const isLiveTvEnabled = hasGenreFilter || !isLiveTvPending || !collectionType || !isLivetv(collectionType);
 
     return useQuery({
-        queryKey: ['Search', 'Items', collectionType, parentId, searchTerm, normalizedGenre],
+        queryKey: ['Search', sessionQueryIdentity, 'Items', collectionType, parentId, searchTerm, normalizedGenre],
         queryFn: async ({ signal }) => {
             if (!hasGenreFilter && liveTvSections && collectionType && isLivetv(collectionType)) {
                 const sections = sortSections(liveTvSections);
+                sessionScopedReadApi!.assertCurrent();
                 return {
                     sections,
                     topResult: sections[0]?.items[0]
@@ -114,11 +116,14 @@ export const useSearchItems = (
                 { signal }
             );
 
-            return buildSearchResultData(sections, itemTypes, searchData.Items || []);
+            const result = buildSearchResultData(sections, itemTypes, searchData.Items || []);
+            sessionScopedReadApi!.assertCurrent();
+            return result;
         },
         enabled: (
             !!api
-            && !!userId
+            && !!sessionQueryIdentity
+            && userId === sessionQueryIdentity.profileUserId
             && !!isArtistsEnabled
             && !!isPeopleEnabled
             && !!isVideosEnabled

@@ -1,23 +1,20 @@
-import { Api } from '@jellyfin/sdk/lib/api';
 import { ItemsApiGetItemsRequest } from '@jellyfin/sdk/lib/generated-client/api/items-api';
-import { getItemsApi } from '@jellyfin/sdk/lib/utils/api/items-api';
-import { AxiosRequestConfig } from 'axios';
+import { type SessionScopedReadApi } from 'utils/jellyfin-apiclient/sessionReadApi';
 import { QUERY_OPTIONS } from '../constants/queryOptions';
 
 export const fetchItemsByType = async (
-    api: Api,
+    api: SessionScopedReadApi,
     userId?: string,
     params?: ItemsApiGetItemsRequest,
-    options?: AxiosRequestConfig
+    options?: { signal?: AbortSignal }
 ) => {
-    const response = await getItemsApi(api).getItems(
+    return api.getItems(
         {
             ...QUERY_OPTIONS,
             userId,
             recursive: true,
             ...params
         },
-        options
+        options?.signal
     );
-    return response.data;
 };

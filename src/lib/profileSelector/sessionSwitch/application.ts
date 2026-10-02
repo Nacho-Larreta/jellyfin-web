@@ -2,6 +2,7 @@ import { getCurrentProfileSelector } from '../api';
 
 import { LegacyProfileSwitchApi, type ProfileSwitchApiPort } from './api';
 import { SessionAdmissionBarrier } from './barrier';
+import { createBoundSessionReadPort, type BoundSessionReadPort, type FreshSessionAuthority } from './boundRequests';
 import {
     ProfileSessionSwitchCoordinator,
     type PlaybackQuiescePort,
@@ -48,11 +49,15 @@ interface ProfileSwitchApiClient {
     getUrl(path: string): string;
     ajax(options: Record<string, unknown>): Promise<{ json(): Promise<unknown> }>;
     serverId(): string;
+    serverAddress(): string;
+    deviceId(): string;
 }
 
 interface SessionSwitchConnections {
     getApiClient(serverId: string): ProfileSwitchApiClient | null;
     getSessionDeviceId(): string;
+    currentApiClient(): ProfileSwitchApiClient | null | undefined;
+    readFreshSessionAuthority(serverId: string): FreshSessionAuthority | null;
     getSessionSwitchEnvelope(serverId: string): unknown;
     replaceSessionSwitchEnvelope(
         serverId: string,
@@ -76,6 +81,9 @@ interface SessionContext {
     readonly coordinator: ProfileSessionSwitchCoordinator;
     readonly runtime: ServerConnectionsSessionRuntime;
     readonly store: AtomicSessionSwitchStore;
+    readonly barrier: SessionAdmissionBarrier;
+    readInitialized: boolean;
+    observationVersion(): number;
 }
 
 export interface ProfileSessionBootstrapResult {
@@ -123,6 +131,24 @@ export class WebSessionSwitchApplication {
         this.createCoordinatorId = options.createCoordinatorId ?? createSecureCoordinatorId;
         this.createApi = options.createApi ?? (serverId => new DelegatingProfileSwitchApi(connections, serverId));
         this.playback = options.playback ?? createDeferredPlaybackPort(connections);
+    }
+
+    captureBoundSessionRead(apiClient: ProfileSwitchApiClient): BoundSessionReadPort | null {
+        const serverId = apiClient.serverId();
+        if (!serverId || this.connections.currentApiClient() !== apiClient
+            || this.connections.getApiClient(serverId) !== apiClient) return null;
+
+        const context = this.getContext(this.createScope(serverId));
+        if (context.barrier.isClosed()) return null;
+
+        const observedBeforeRead = context.observationVersion();
+        const authority = this.connections.readFreshSessionAuthority(serverId);
+        if (context.observationVersion() !== observedBeforeRead || context.barrier.isClosed()) return null;
+        if (!context.readInitialized) {
+            context.readInitialized = true;
+            context.barrier.synchronize(authority?.envelope ?? null);
+        }
+        return createBoundSessionReadPort(apiClient, this.connections, context.barrier, authority);
     }
 
     async bootstrapAuthenticatedSession(
@@ -340,7 +366,9 @@ export class WebSessionSwitchApplication {
         const store = new ServerConnectionsSessionSwitchStore(this.connections);
         const barrier = new SessionAdmissionBarrier();
         const runtime = new ServerConnectionsSessionRuntime(this.connections);
+        let observationVersion = 0;
         store.subscribe(scope, observation => {
+            observationVersion += 1;
             if (observation === null || 'kind' in observation) {
                 runtime.invalidate(scope.serverId);
             }
@@ -354,7 +382,14 @@ export class WebSessionSwitchApplication {
             runtime,
             clock: this.clock
         });
-        const context = { coordinator, runtime, store };
+        const context = {
+            coordinator,
+            runtime,
+            store,
+            barrier,
+            readInitialized: false,
+            observationVersion: () => observationVersion
+        };
         this.contexts.set(key, context);
         return context;
     }

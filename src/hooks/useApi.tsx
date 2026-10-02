@@ -8,6 +8,8 @@ import ConnectionErrorPage from 'components/ConnectionErrorPage';
 import Loading from 'components/loading/LoadingComponent';
 import viewContainer from 'components/viewContainer';
 import { ConnectionState, ServerConnections } from 'lib/jellyfin-apiclient';
+import { getWebSessionSwitchApplication } from 'lib/profileSelector/sessionSwitch/application';
+import { type BoundSessionReadIdentity } from 'lib/profileSelector/sessionSwitch/boundRequests';
 import {
     assertSessionEnvelope,
     type SessionSwitchCompletionReceipt,
@@ -15,11 +17,14 @@ import {
 } from 'lib/profileSelector/sessionSwitch/model';
 import events from 'utils/events';
 import { toApi } from 'utils/jellyfin-apiclient/compat';
+import { createSessionScopedReadApi, type SessionScopedReadApi } from 'utils/jellyfin-apiclient/sessionReadApi';
 import { queryClient } from 'utils/query/queryClient';
 
 export interface JellyfinApiContext {
     __legacyApiClient__?: ApiClient
     api?: Api
+    sessionScopedReadApi?: SessionScopedReadApi
+    sessionQueryIdentity?: BoundSessionReadIdentity
     user?: UserDto
 }
 
@@ -50,6 +55,18 @@ function isCompletedEnvelope(value: unknown, receipt: SessionSwitchCompletionRec
         && value.activeSession.serverId === receipt.serverId
         && value.activeSession.profileUserId === receipt.profileUserId
         && value.activeSession.sessionEpoch === receipt.sessionEpoch;
+}
+
+function createPublishedContext(client: ApiClient, user: UserDto, serverId: string): JellyfinApiContext {
+    const port = getWebSessionSwitchApplication(ServerConnections).captureBoundSessionRead(client);
+    const sessionScopedReadApi = port ? createSessionScopedReadApi(client, port) : undefined;
+    return {
+        __legacyApiClient__: client,
+        api: toApi(client),
+        sessionScopedReadApi,
+        sessionQueryIdentity: sessionScopedReadApi?.identity,
+        user: { ...user, ServerId: serverId }
+    };
 }
 
 interface ApiProviderProps {
@@ -101,14 +118,14 @@ export const ApiProvider: FC<PropsWithChildren<ApiProviderProps>> = ({
                 || client.getCurrentUserId() !== newUser.Id
                 || !client.accessToken()) return;
 
-            let api: Api;
+            let published: JellyfinApiContext;
             try {
                 const envelope = ServerConnections.getSessionSwitchEnvelope(serverId);
                 if (envelope && (envelope.marker !== null
                     || envelope.activeSession.serverId !== serverId
                     || envelope.activeSession.profileUserId !== newUser.Id
                     || envelope.activeSession.credentialRef.token !== client.accessToken())) return;
-                api = toApi(client);
+                published = createPublishedContext(client, newUser, serverId);
             } catch {
                 cancelPendingCompletion();
                 setContext({});
@@ -117,11 +134,7 @@ export const ApiProvider: FC<PropsWithChildren<ApiProviderProps>> = ({
             }
 
             cancelPendingCompletion();
-            setContext({
-                __legacyApiClient__: client,
-                api,
-                user: { ...newUser, ServerId: serverId }
-            });
+            setContext(published);
             setAvailability('ready');
         };
 
@@ -158,14 +171,10 @@ export const ApiProvider: FC<PropsWithChildren<ApiProviderProps>> = ({
                     return;
                 }
 
-                const api = toApi(client);
+                const published = createPublishedContext(client, user, receipt.serverId);
                 cancelPendingCompletion();
                 completionInProgress = false;
-                setContext({
-                    __legacyApiClient__: client,
-                    api,
-                    user: { ...user, ServerId: receipt.serverId }
-                });
+                setContext(published);
                 setAvailability('ready');
             } catch {
                 showUnavailable(expectedGeneration);

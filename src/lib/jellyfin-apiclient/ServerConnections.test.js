@@ -212,6 +212,63 @@ function createConnections(provider, lockManager = createLockManager()) {
 }
 
 describe('ServerConnections session envelope adapter', () => {
+    it('reads authority from fresh persisted credentials instead of the provider cache', () => {
+        const provider = createProvider({ ProfileSelectorEnabled: true, SessionSwitchAuthorityRevision: 2 });
+        const connections = createConnections(provider);
+        const saved = provider.state();
+        saved.Servers[0].UserId = 'replacement-user';
+        saved.Servers[0].AccessToken = 'replacement-token';
+        saved.Servers[0].SessionSwitchAuthorityRevision = 3;
+        provider.appStorage.setItem(provider.key, JSON.stringify(saved));
+
+        expect(connections.readFreshSessionAuthority('server-1')).toEqual(expect.objectContaining({
+            userId: 'replacement-user',
+            accessToken: 'replacement-token',
+            selectorEnabled: true,
+            authorityRevision: 3
+        }));
+        expect(provider.state().Servers[0].UserId).toBe('old-user');
+    });
+
+    it('rejects corrupt persisted envelope and authority revision', () => {
+        const provider = createProvider();
+        const connections = createConnections(provider);
+        const saved = provider.state();
+        saved.Servers[0].SessionSwitchEnvelope = { version: -1 };
+        provider.appStorage.setItem(provider.key, JSON.stringify(saved));
+        expect(() => connections.readFreshSessionAuthority('server-1'))
+            .toThrow('Invalid session switch envelope version.');
+
+        saved.Servers[0].SessionSwitchEnvelope = null;
+        saved.Servers[0].SessionSwitchAuthorityRevision = -1;
+        provider.appStorage.setItem(provider.key, JSON.stringify(saved));
+        expect(() => connections.readFreshSessionAuthority('server-1'))
+            .toThrow(SessionStorageCorruptionError);
+    });
+
+    it('keeps explicit selector-disabled authority distinct from absent flag and persisted marker', () => {
+        const provider = createProvider();
+        const connections = createConnections(provider);
+        const saved = provider.state();
+        saved.Servers[0].SessionSwitchEnvelope = null;
+        provider.appStorage.setItem(provider.key, JSON.stringify(saved));
+        expect(connections.readFreshSessionAuthority('server-1')).toMatchObject({
+            selectorEnabled: undefined, envelope: null
+        });
+
+        saved.Servers[0].ProfileSelectorEnabled = false;
+        provider.appStorage.setItem(provider.key, JSON.stringify(saved));
+        expect(connections.readFreshSessionAuthority('server-1')).toMatchObject({
+            selectorEnabled: false, envelope: null
+        });
+
+        saved.Servers[0].ProfileSelectorEnabled = true;
+        saved.Servers[0].SessionSwitchEnvelope = createPendingEnvelope();
+        provider.appStorage.setItem(provider.key, JSON.stringify(saved));
+        expect(connections.readFreshSessionAuthority('server-1').envelope.marker)
+            .toMatchObject({ kind: 'PendingSwitch' });
+    });
+
     function arrangeLoginPublication(provider = createProvider(), lockManager) {
         const connections = createConnections(provider, lockManager);
         const apiClient = { serverId: () => 'server-1' };
@@ -846,6 +903,9 @@ describe('ServerConnections session envelope adapter', () => {
             OwnerAccessToken: null,
             SessionSwitchEnvelope: null
         }));
+        expect(connections.readFreshSessionAuthority('server-1')).toMatchObject({
+            userId: null, accessToken: null, envelope: null
+        });
 
         const invalid = createProvider().state().Servers[0];
         revokeSavedSessionAuthority(invalid);
@@ -867,6 +927,7 @@ describe('ServerConnections session envelope adapter', () => {
         await connections.deleteServer('server-1');
 
         expect(provider.state().Servers).toEqual([]);
+        expect(connections.readFreshSessionAuthority('server-1')).toBeNull();
         expect(observed).toHaveBeenCalledWith(null);
     });
 
