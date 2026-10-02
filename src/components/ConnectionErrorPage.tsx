@@ -11,10 +11,12 @@ import { ConnectionState, ServerConnections } from 'lib/jellyfin-apiclient';
 
 interface ConnectionErrorPageProps {
     state: ConnectionState
+    onSelectServer?: () => void
 }
 
 const ConnectionErrorPage: FC<ConnectionErrorPageProps> = ({
-    state
+    state,
+    onSelectServer
 }) => {
     const [ title, setTitle ] = useState<string>();
     const [ htmlMessage, setHtmlMessage ] = useState<string>();
@@ -83,7 +85,8 @@ const ConnectionErrorPage: FC<ConnectionErrorPageProps> = ({
                 {appHost.supports(AppFeature.MultiServer) && (
                     <LinkButton
                         className='raised'
-                        href='/selectserver'
+                        href={onSelectServer ? '#' : '/selectserver'}
+                        onClick={onSelectServer}
                     >
                         {globalize.translate('ButtonChangeServer')}
                     </LinkButton>
