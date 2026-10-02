@@ -43,6 +43,27 @@ const getMaxBandwidth = () => {
 
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 
+const normalizedServerAddress = address => {
+    if (typeof address !== 'string') return null;
+    try {
+        const url = new URL(address);
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+            return null;
+        }
+        let basePath = url.pathname;
+        while (basePath.length > 1 && basePath.endsWith('/')) {
+            basePath = basePath.slice(0, -1);
+        }
+        return `${url.origin}${basePath}`;
+    } catch {
+        return null;
+    }
+};
+
+const savedServerAddresses = server => [
+    server.ManualAddress, server.LocalAddress, server.RemoteAddress
+].map(normalizedServerAddress).filter(Boolean);
+
 const parseStoredCredentials = serialized => {
     let credentials;
     try {
@@ -221,7 +242,28 @@ export class ServerConnections extends ConnectionManager {
     initApiClient(serverAddress) {
         console.debug('creating ApiClient singleton');
 
-        const apiClient = new ApiClient(
+        const requestedAddress = normalizedServerAddress(serverAddress);
+        const savedServers = this.getSavedServers();
+        const legacyAddressMatches = savedServers.filter(server => server.Id && savedServerAddresses(server)
+            .some(address => address.toLowerCase() === requestedAddress?.toLowerCase() && address !== requestedAddress));
+        const selectedServers = savedServers.filter(server => server.Id && savedServerAddresses(server)
+            .includes(requestedAddress));
+        if (selectedServers.length > 1) {
+            throw new Error('[ServerConnection] Ambiguous saved server address');
+        }
+
+        const selectedServer = selectedServers[0];
+        const registeredClients = selectedServer ? this._apiClients.filter(client =>
+            client.serverInfo?.()?.Id === selectedServer.Id) : [];
+        if (registeredClients.length > 1 || registeredClients.some(client =>
+            normalizedServerAddress(client.serverAddress()) !== requestedAddress)) {
+            throw new Error('[ServerConnection] Conflicting registered client');
+        }
+        if (!registeredClients.length && legacyAddressMatches.length) {
+            throw new Error('[ServerConnection] Ambiguous saved server address');
+        }
+
+        const apiClient = registeredClients[0] || new ApiClient(
             serverAddress,
             appHost.appName(),
             appHost.appVersion(),
@@ -232,7 +274,7 @@ export class ServerConnections extends ConnectionManager {
         apiClient.enableAutomaticNetworking = false;
         apiClient.manualAddressOnly = true;
 
-        this.addApiClient(apiClient);
+        if (!registeredClients.length) this.addApiClient(apiClient);
 
         this.setLocalApiClient(apiClient);
 

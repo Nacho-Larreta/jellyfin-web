@@ -58,6 +58,39 @@ const fetchPublicSystemInfo = async (apiClient: ApiClient) => {
     return infoResponse.json();
 };
 
+const normalizedConnectionAddress = (address: unknown): string | null => {
+    if (typeof address !== 'string') return null;
+    try {
+        const url = new URL(address);
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+            return null;
+        }
+        let basePath = url.pathname;
+        while (basePath.length > 1 && basePath.endsWith('/')) {
+            basePath = basePath.slice(0, -1);
+        }
+        return `${url.origin}${basePath}`;
+    } catch {
+        return null;
+    }
+};
+
+const responseConfirmsAddress = (response: ConnectResponse, serverId: string, address: string): boolean => {
+    const responseServer = response.Servers?.find(server => server?.Id === serverId);
+    return [
+        responseServer?.ManualAddress,
+        responseServer?.LocalAddress,
+        responseServer?.RemoteAddress
+    ].some(candidate => normalizedConnectionAddress(candidate) === address);
+};
+
+const hasNewerClient = (
+    currentClient: ApiClient | undefined,
+    initialClient: ApiClient | undefined,
+    confirmedClient: ApiClient
+): boolean => Boolean(currentClient?.isLoggedIn())
+    || (currentClient !== initialClient && currentClient !== confirmedClient);
+
 const validateAdministrator = async (
     apiClient: ApiClient | undefined,
     isCurrent: () => boolean,
@@ -109,19 +142,44 @@ const ConnectionRequired: FunctionComponent<ConnectionRequiredProps> = ({
         const navigateCurrent = (target: string) => {
             if (isCurrent()) navigate(target);
         };
-        const bounce = async (connectionResponse: ConnectResponse) => {
+        const selectConfirmedFirstClient = (response: ConnectResponse, initialClient: ApiClient | undefined) => {
+            const currentClient = ServerConnections.currentApiClient();
+            if (!isCurrent() || hasNewerClient(currentClient, initialClient, response.ApiClient)) return 'superseded';
+
+            const confirmedClient = response.ApiClient;
+            const serverId = confirmedClient?.serverId();
+            const address = normalizedConnectionAddress(confirmedClient?.serverAddress());
+            if (!serverId || !address || !responseConfirmsAddress(response, serverId, address)
+                || ServerConnections.getApiClient(serverId) !== confirmedClient
+                || (initialClient?.serverId() && initialClient !== confirmedClient)) return 'invalid';
+
+            if (currentClient !== confirmedClient) ServerConnections.setLocalApiClient(confirmedClient);
+            return 'confirmed';
+        };
+        const showServerSignIn = (response: ConnectResponse, initialClient?: ApiClient) => {
+            if (initialClient) {
+                const selection = selectConfirmedFirstClient(response, initialClient);
+                if (selection === 'superseded') return;
+                if (selection === 'invalid') {
+                    setValidation({ status: 'error', routeKey, connectionState: ConnectionState.ServerMismatch });
+                    return;
+                }
+            }
+            if (location.pathname === BounceRoutes.Login) {
+                authorize();
+            } else {
+                const url = encodeURIComponent(location.pathname + location.search);
+                navigateCurrent(`${BounceRoutes.Login}?serverid=${response.ApiClient.serverId()}&url=${url}`);
+            }
+        };
+        const bounce = async (connectionResponse: ConnectResponse, initialClient?: ApiClient) => {
             if (!isCurrent()) return;
             switch (connectionResponse.State) {
                 case ConnectionState.SignedIn:
                     navigateCurrent(BounceRoutes.Home);
                     return;
                 case ConnectionState.ServerSignIn:
-                    if (location.pathname === BounceRoutes.Login) {
-                        authorize();
-                    } else {
-                        const url = encodeURIComponent(location.pathname + location.search);
-                        navigateCurrent(`${BounceRoutes.Login}?serverid=${connectionResponse.ApiClient.serverId()}&url=${url}`);
-                    }
+                    showServerSignIn(connectionResponse, initialClient);
                     return;
                 case ConnectionState.ServerSelection:
                     if (location.pathname === BounceRoutes.SelectServer) authorize();
@@ -143,7 +201,7 @@ const ConnectionRequired: FunctionComponent<ConnectionRequiredProps> = ({
             ServerConnections.setLocalApiClient(apiClient);
             authorize();
         };
-        const handleIncompleteWizard = async (firstConnection: ConnectResponse) => {
+        const handleIncompleteWizard = async (firstConnection: ConnectResponse, initialClient: ApiClient | undefined) => {
             if (firstConnection.State === ConnectionState.ServerSignIn) {
                 const systemInfo = await fetchPublicSystemInfo(firstConnection.ApiClient);
                 if (!isCurrent()) return;
@@ -153,7 +211,7 @@ const ConnectionRequired: FunctionComponent<ConnectionRequiredProps> = ({
                     return;
                 }
             }
-            await bounce(firstConnection);
+            await bounce(firstConnection, initialClient);
         };
         const validateProtectedSession = async (client: ApiClient | undefined) => {
             const needsDirectBootstrap = level === AccessLevel.Admin
@@ -210,7 +268,7 @@ const ConnectionRequired: FunctionComponent<ConnectionRequiredProps> = ({
             } else if (firstConnection
                 && firstConnection.State !== ConnectionState.SignedIn
                 && !initialApiClient?.isLoggedIn()) {
-                await handleIncompleteWizard(firstConnection);
+                await handleIncompleteWizard(firstConnection, initialApiClient);
             } else {
                 await validateUserAccess();
             }
