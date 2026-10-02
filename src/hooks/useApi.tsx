@@ -18,12 +18,14 @@ import {
 import events from 'utils/events';
 import { toApi } from 'utils/jellyfin-apiclient/compat';
 import { createSessionScopedReadApi, type SessionScopedReadApi } from 'utils/jellyfin-apiclient/sessionReadApi';
+import { type BoundUserViewsRead } from 'utils/jellyfin-apiclient/boundUserViewsQuery';
 import { queryClient } from 'utils/query/queryClient';
 
 export interface JellyfinApiContext {
     __legacyApiClient__?: ApiClient
     api?: Api
     sessionScopedReadApi?: SessionScopedReadApi
+    sessionScopedUserViewsReadApi?: BoundUserViewsRead
     sessionQueryIdentity?: BoundSessionReadIdentity
     user?: UserDto
 }
@@ -64,6 +66,7 @@ function createPublishedContext(client: ApiClient, user: UserDto, serverId: stri
         __legacyApiClient__: client,
         api: toApi(client),
         sessionScopedReadApi,
+        sessionScopedUserViewsReadApi: sessionScopedReadApi,
         sessionQueryIdentity: sessionScopedReadApi?.identity,
         user: { ...user, ServerId: serverId }
     };

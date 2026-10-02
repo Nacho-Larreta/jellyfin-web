@@ -2,13 +2,13 @@ import escapeHtml from 'escape-html';
 import Headroom from 'headroom.js';
 
 import { AppFeature } from 'constants/appFeature';
-import { getUserViewsQuery } from 'hooks/useUserViews';
 import globalize from 'lib/globalize';
 import { ServerConnections } from 'lib/jellyfin-apiclient';
 import { getCurrentProfileSelector } from 'lib/profileSelector/api';
 import { getProfileAvatarGradientForUser } from 'lib/profileSelector/colors';
+import { getWebSessionSwitchApplication } from 'lib/profileSelector/sessionSwitch/application';
 import { EventType } from 'constants/eventType';
-import { toApi } from 'utils/jellyfin-apiclient/compat';
+import { createSessionScopedReadApi } from 'utils/jellyfin-apiclient/sessionReadApi';
 import { queryClient } from 'utils/query/queryClient';
 
 import dom from '../utils/dom';
@@ -28,6 +28,7 @@ import { PluginType } from '../types/plugin.ts';
 import Events from '../utils/events.ts';
 import { getParameterByName } from '../utils/url.ts';
 import datetime from '../scripts/datetime';
+import { createLibraryMenuViews } from './libraryMenuViews';
 
 import '../elements/emby-button/paper-icon-button-light';
 
@@ -365,7 +366,7 @@ function onMainDrawerSelect() {
 
 function refreshLibraryInfoInDrawer(user) {
     let html = '';
-    const currentServer = getCurrentApiClient()?.serverInfo?.();
+    const currentServer = ServerConnections.currentApiClient()?.serverInfo?.();
     html += '<div style="height:.5em;"></div>';
     html += `<a is="emby-linkbutton" class="navMenuOption lnkMediaFolder" href="#/home"><span class="material-icons navMenuOptionIcon home" aria-hidden="true"></span><span class="navMenuOptionText">${globalize.translate('Home')}</span></a>`;
 
@@ -375,7 +376,7 @@ function refreshLibraryInfoInDrawer(user) {
     // libraries are added here
     html += '<div class="libraryMenuOptions"></div>';
 
-    if (user.localUser?.Policy.IsAdministrator) {
+    if (user.localUser?.Policy?.IsAdministrator) {
         html += '<div class="adminMenuOptions">';
         html += '<h3 class="sidebarHeader">';
         html += globalize.translate('HeaderAdmin');
@@ -395,7 +396,7 @@ function refreshLibraryInfoInDrawer(user) {
             html += `<a is="emby-linkbutton" class="navMenuOption lnkMediaFolder btnSelectServer" data-itemid="selectserver" href="#"><span class="material-icons navMenuOptionIcon storage" aria-hidden="true"></span><span class="navMenuOptionText">${globalize.translate('SelectServer')}</span></a>`;
         }
 
-        if (currentServer?.ProfileSelectorEnabled || user.localUser?.Policy.IsAdministrator) {
+        if (currentServer?.ProfileSelectorEnabled || user.localUser?.Policy?.IsAdministrator) {
             html += `<a is="emby-linkbutton" class="navMenuOption lnkMediaFolder btnSwitchProfile" data-itemid="switchprofile" href="#"><span class="material-icons navMenuOptionIcon switch_account" aria-hidden="true"></span><span class="navMenuOptionText">${globalize.translate('SwitchProfile')}</span></a>`;
         }
 
@@ -444,103 +445,60 @@ function onSidebarLinkClick() {
     LibraryMenu.setTitle(text);
 }
 
-function getUserViews(apiClient, userId) {
-    return queryClient
-        .fetchQuery(getUserViewsQuery(toApi(apiClient), userId))
-        .then(function (result) {
-            const items = result.Items;
-            const list = [];
+function renderCustomMenuLinks(target, links) {
+    links.forEach(link => {
+        const option = document.createElement('a', 'emby-linkbutton');
+        option.classList.add('navMenuOption', 'lnkMediaFolder');
+        option.rel = 'noopener noreferrer';
+        option.target = '_blank';
+        option.href = link.url;
 
-            for (let i = 0, length = items.length; i < length; i++) {
-                const view = items[i];
-                list.push(view);
+        const icon = document.createElement('span');
+        icon.className = `material-icons navMenuOptionIcon ${link.icon || 'link'}`;
+        icon.setAttribute('aria-hidden', 'true');
+        option.appendChild(icon);
 
-                if (view.CollectionType == 'livetv') {
-                    view.icon = 'live_tv';
-                    const guideView = Object.assign({}, view);
-                    guideView.Name = globalize.translate('Guide');
-                    guideView.ImageTags = {};
-                    guideView.icon = 'dvr';
-                    guideView.url = '#/livetv?tab=1';
-                    list.push(guideView);
-                }
-            }
+        const label = document.createElement('span');
+        label.className = 'navMenuOptionText';
+        label.textContent = link.name;
+        option.appendChild(label);
 
-            return list;
-        });
+        target.appendChild(option);
+    });
 }
 
-function showBySelector(selector, show) {
-    const elem = document.querySelector(selector);
-
-    if (elem) {
-        if (show) {
-            elem.classList.remove('hide');
-        } else {
-            elem.classList.add('hide');
+function renderLibraryMenuViews(target, result) {
+    const items = [];
+    for (const view of result.Items || []) {
+        items.push(view);
+        if (view.CollectionType === 'livetv') {
+            items.push({ ...view, Name: globalize.translate('Guide'), ImageTags: {}, icon: 'dvr', url: '#/livetv?tab=1' });
         }
     }
+
+    let html = `<h3 class="sidebarHeader">${globalize.translate('HeaderMedia')}</h3>`;
+    html += items.map(item => {
+        const icon = item.icon || (item.CollectionType === 'livetv' ? 'live_tv' : imageHelper.getLibraryIcon(item.CollectionType));
+        return `<a is="emby-linkbutton" data-itemid="${escapeHtml(item.Id || '')}" class="lnkMediaFolder navMenuOption" href="${escapeHtml(getItemHref(item, item.CollectionType))}">
+                    <span class="material-icons navMenuOptionIcon ${escapeHtml(icon)}" aria-hidden="true"></span>
+                    <span class="sectionName navMenuOptionText">${escapeHtml(item.Name || '')}</span>
+                </a>`;
+    }).join('');
+    target.innerHTML = html;
+    for (const sidebarLink of target.querySelectorAll('.navMenuOption')) {
+        sidebarLink.addEventListener('click', onSidebarLinkClick);
+    }
 }
 
-function updateLibraryMenu(user) {
-    if (!user) {
-        showBySelector('.userMenuOptions', false);
-        return;
-    }
+function clearLibraryDrawer() {
+    currentDrawerType = null;
+    if (!navDrawerScrollContainer) return;
 
-    const userId = Dashboard.getCurrentUserId();
-    const apiClient = getCurrentApiClient();
-
-    const customMenuOptions = document.querySelector('.customMenuOptions');
-    if (customMenuOptions) {
-        getMenuLinks().then(links => {
-            links.forEach(link => {
-                const option = document.createElement('a', 'emby-linkbutton');
-                option.classList.add('navMenuOption', 'lnkMediaFolder');
-                option.rel = 'noopener noreferrer';
-                option.target = '_blank';
-                option.href = link.url;
-
-                const icon = document.createElement('span');
-                icon.className = `material-icons navMenuOptionIcon ${link.icon || 'link'}`;
-                icon.setAttribute('aria-hidden', 'true');
-                option.appendChild(icon);
-
-                const label = document.createElement('span');
-                label.className = 'navMenuOptionText';
-                label.textContent = link.name;
-                option.appendChild(label);
-
-                customMenuOptions.appendChild(option);
-            });
-        });
-    }
-
-    const libraryMenuOptions = document.querySelector('.libraryMenuOptions');
-
-    if (libraryMenuOptions) {
-        getUserViews(apiClient, userId).then(function (result) {
-            const items = result;
-            let html = `<h3 class="sidebarHeader">${globalize.translate('HeaderMedia')}</h3>`;
-            html += items.map(function (i) {
-                const icon = i.icon || imageHelper.getLibraryIcon(i.CollectionType);
-                const itemId = i.Id;
-
-                return `<a is="emby-linkbutton" data-itemid="${itemId}" class="lnkMediaFolder navMenuOption" href="${getItemHref(i, i.CollectionType)}">
-                                    <span class="material-icons navMenuOptionIcon ${icon}" aria-hidden="true"></span>
-                                    <span class="sectionName navMenuOptionText">${escapeHtml(i.Name)}</span>
-                                  </a>`;
-            }).join('');
-            libraryMenuOptions.innerHTML = html;
-            const elem = libraryMenuOptions;
-            const sidebarLinks = elem.querySelectorAll('.navMenuOption');
-
-            for (const sidebarLink of sidebarLinks) {
-                sidebarLink.removeEventListener('click', onSidebarLinkClick);
-                sidebarLink.addEventListener('click', onSidebarLinkClick);
-            }
-        });
-    }
+    const home = document.createElement('a', 'emby-linkbutton');
+    home.className = 'navMenuOption lnkMediaFolder';
+    home.href = '#/home';
+    home.textContent = globalize.translate('Home');
+    navDrawerScrollContainer.replaceChildren(home);
 }
 
 function getTopParentId() {
@@ -694,18 +652,44 @@ function initHeadRoom(elem) {
     headroom.init();
 }
 
-function refreshLibraryDrawer(user) {
-    loadNavDrawer();
-    currentDrawerType = 'library';
+const libraryMenuViews = createLibraryMenuViews({
+    captureRead: () => {
+        const client = ServerConnections.currentApiClient();
+        if (!client) return null;
+        const port = getWebSessionSwitchApplication(ServerConnections).captureBoundSessionRead(client);
+        return port && createSessionScopedReadApi(client, port);
+    },
+    prepareDrawer: async () => {
+        await loadNavDrawer();
+        return navDrawerScrollContainer;
+    },
+    currentDrawer: () => navDrawerScrollContainer,
+    clear: clearLibraryDrawer,
+    renderUser: (container, user) => {
+        refreshLibraryInfoInDrawer({ localUser: user });
+        return {
+            libraries: container.querySelector('.libraryMenuOptions'),
+            links: container.querySelector('.customMenuOptions')
+        };
+    },
+    renderViews: renderLibraryMenuViews,
+    getLinks: getMenuLinks,
+    renderLinks: renderCustomMenuLinks,
+    subscribeAuthority: (read, listener) => ServerConnections.subscribeSessionSwitchEnvelope(
+        read.identity.serverId, listener
+    ),
+    queryClient,
+    onError: () => console.error('[LibraryMenu] Failed to load current library views')
+});
 
-    if (user) {
-        Promise.resolve(user);
-    } else {
-        ServerConnections.user(getCurrentApiClient()).then(function (userResult) {
-            refreshLibraryInfoInDrawer(userResult);
-            updateLibraryMenu(userResult.localUser);
-        });
-    }
+let libraryDrawerRefreshGeneration = 0;
+function refreshLibraryDrawer() {
+    const expected = ++libraryDrawerRefreshGeneration;
+    const refreshing = libraryMenuViews.refresh();
+    currentDrawerType = 'library-loading';
+    void refreshing.then(rendered => {
+        if (expected === libraryDrawerRefreshGeneration) currentDrawerType = rendered ? 'library' : null;
+    });
 }
 
 function getNavDrawerOptions() {
@@ -887,12 +871,13 @@ Events.on(ServerConnections, 'apiclientcreated', (e, newApiClient) => {
 Events.on(ServerConnections, 'localusersignedin', function (e, user) {
     const currentApiClient = ServerConnections.getApiClient(user.ServerId);
 
+    libraryMenuViews.invalidate();
     currentDrawerType = null;
     currentUser = {
         localUser: user
     };
 
-    loadNavDrawer();
+    refreshLibraryDrawer();
 
     ServerConnections.user(currentApiClient).then(function (userResult) {
         currentUser = userResult;
@@ -901,8 +886,16 @@ Events.on(ServerConnections, 'localusersignedin', function (e, user) {
 });
 
 Events.on(ServerConnections, 'localusersignedout', function () {
+    libraryMenuViews.invalidate();
+    currentDrawerType = null;
     currentUser = {};
     updateUserInHeader();
+});
+
+Events.on(ServerConnections, 'sessionswitchcompleted', function () {
+    libraryMenuViews.invalidate();
+    currentDrawerType = null;
+    refreshLibraryDrawer();
 });
 
 Events.on(playbackManager, 'playerchange', updateCastIcon);

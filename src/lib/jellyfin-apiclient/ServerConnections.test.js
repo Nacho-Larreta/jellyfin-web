@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { QueryClient } from '@tanstack/react-query';
+import { createLibraryMenuViews } from 'scripts/libraryMenuViews';
 
 const { ajaxMock, constructedApiClients } = vi.hoisted(() => ({
     ajaxMock: vi.fn(),
@@ -698,6 +700,134 @@ describe('ServerConnections session envelope adapter', () => {
         }));
         expect(providerB.writes).toHaveLength(1);
         expect(providerB.writes[0].Servers[0].SessionSwitchEnvelope).toEqual(envelope);
+    });
+
+    it('notifies current-user view subscribers only after a selector change is durable', async () => {
+        const provider = createProvider({ ProfileSelectorEnabled: false, SessionSwitchAuthorityRevision: 4 });
+        const connections = createConnections(provider);
+        const before = connections.readFreshSessionAuthority('server-1');
+        const seen = [];
+        connections.subscribeSessionSwitchEnvelope('server-1', envelope => {
+            seen.push({ envelope, authority: connections.readFreshSessionAuthority('server-1') });
+        });
+
+        await connections.setProfileSelectorAvailability('server-1', true);
+        await connections.setProfileSelectorAvailability('server-1', false);
+
+        expect(seen).toHaveLength(2);
+        expect(seen.map(event => event.authority.selectorEnabled)).toEqual([ true, false ]);
+        for (const event of seen) {
+            expect(event.envelope).toEqual(before.envelope);
+            expect(event.authority).toEqual(expect.objectContaining({
+                authorityRevision: before.authorityRevision,
+                envelope: before.envelope
+            }));
+        }
+    });
+
+    it('does not notify a missing or failed selector update', async () => {
+        const provider = createProvider({ ProfileSelectorEnabled: false });
+        const connections = createConnections(provider);
+        const observed = vi.fn();
+        connections.subscribeSessionSwitchEnvelope('server-1', observed);
+        connections.subscribeSessionSwitchEnvelope('missing', observed);
+
+        expect(await connections.setProfileSelectorAvailability('missing', true)).toBeNull();
+        provider.failOnce();
+        await expect(connections.setProfileSelectorAvailability('server-1', true))
+            .rejects.toThrow('persistence failpoint');
+
+        expect(observed).not.toHaveBeenCalled();
+        expect(connections.readFreshSessionAuthority('server-1').selectorEnabled).toBe(false);
+    });
+
+    it('retains a null envelope, marker, and revision while notifying after the selector write', async () => {
+        const provider = createProvider({
+            ProfileSelectorEnabled: false,
+            SessionSwitchEnvelope: null,
+            SessionSwitchAuthorityRevision: 3
+        });
+        const connections = createConnections(provider);
+        const seen = [];
+        connections.subscribeSessionSwitchEnvelope('server-1', envelope => {
+            seen.push({ envelope, authority: connections.readFreshSessionAuthority('server-1') });
+        });
+
+        await connections.setProfileSelectorAvailability('server-1', true);
+
+        expect(seen).toEqual([{ envelope: null, authority: expect.objectContaining({
+            selectorEnabled: true,
+            envelope: null,
+            authorityRevision: 3
+        }) }]);
+        expect(provider.state().Servers[0].SessionSwitchEnvelope).toBeNull();
+    });
+
+    it('clears a painted legacy menu through the real selector setter and rejects its late views', async () => {
+        const provider = createProvider({ ProfileSelectorEnabled: false });
+        const connections = createConnections(provider);
+        const container = document.createElement('div');
+        document.body.append(container);
+        const oldRequest = createDeferred();
+        const read = {
+            identity: {
+                serverId: 'server-1', profileUserId: 'old-user',
+                sessionEpoch: 7, authorityGeneration: '7:old'
+            },
+            assertCurrent: () => {
+                if (connections.readFreshSessionAuthority('server-1').selectorEnabled !== false) {
+                    throw new Error('stale');
+                }
+            },
+            getCurrentUser: async () => ({ Id: 'old-user', ServerId: 'server-1' }),
+            getUserViews: vi.fn(async () => ({ Items: [{ Name: 'old-view' }] }))
+        };
+        let activeRead = read;
+        const menu = createLibraryMenuViews({
+            captureRead: () => activeRead,
+            prepareDrawer: async () => container,
+            currentDrawer: () => container,
+            clear: () => container.replaceChildren(),
+            renderUser: () => {
+                const libraries = document.createElement('div');
+                container.append(libraries);
+                return { libraries };
+            },
+            renderViews: (target, result) => { target.textContent = result.Items[0].Name; },
+            getLinks: async () => [],
+            renderLinks: vi.fn(),
+            subscribeAuthority: (bound, listener) => connections.subscribeSessionSwitchEnvelope(
+                bound.identity.serverId, listener
+            ),
+            queryClient: new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 0 } } }),
+            onError: vi.fn()
+        });
+        try {
+            await menu.refresh();
+            expect(container.textContent).toBe('old-view');
+            await connections.setProfileSelectorAvailability('server-1', false);
+            expect(container.textContent).toBe('old-view');
+            await connections.setProfileSelectorAvailability('server-1', true);
+            expect(container.textContent).toBe('');
+            await connections.setProfileSelectorAvailability('server-1', false);
+            expect(container.textContent).toBe('');
+            const delayedRead = {
+                ...read,
+                identity: { ...read.identity, authorityGeneration: '7:next' },
+                getUserViews: vi.fn(() => oldRequest.promise)
+            };
+            activeRead = delayedRead;
+            const pendingRefresh = menu.refresh();
+            await vi.waitFor(() => expect(delayedRead.getUserViews).toHaveBeenCalledOnce());
+            await connections.setProfileSelectorAvailability('server-1', true);
+            expect(container.textContent).toBe('');
+            await connections.setProfileSelectorAvailability('server-1', false);
+            oldRequest.resolve({ Items: [{ Name: 'late-view' }] });
+            await pendingRefresh;
+            expect(container.textContent).toBe('');
+        } finally {
+            container.remove();
+        }
     });
 
     it('routes inherited discovery metadata through fresh credentials without overwriting another context commit', async () => {

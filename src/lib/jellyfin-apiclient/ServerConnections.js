@@ -716,7 +716,7 @@ export class ServerConnections extends ConnectionManager {
 
         return this.updateSavedServer(serverId, server => {
             server.ProfileSelectorEnabled = !!isEnabled;
-        });
+        }, { notifySessionEnvelope: true });
     }
 
     async applyAuthenticationResult(serverId, authenticationResult) {
