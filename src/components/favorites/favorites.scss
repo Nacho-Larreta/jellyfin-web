@@ -7,6 +7,10 @@
     pointer-events: none;
 }
 
+#favoritesTab .itemsContainer > .card > .cardBox {
+    margin-inline-start: var(--jf-semantic-space-2);
+}
+
 #favoritesTab .cardImageContainer.cardContent.itemAction:focus-visible {
     outline: var(--jf-semantic-space-1) solid var(--jf-semantic-focus-indicator) !important;
     outline-offset: calc(var(--jf-semantic-space-1) / 2);
