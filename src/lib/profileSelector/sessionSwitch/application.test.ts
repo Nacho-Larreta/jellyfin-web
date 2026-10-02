@@ -114,6 +114,22 @@ const enabledSecondarySelector = {
 };
 
 describe('verified route presentation readiness', () => {
+    it('grants ordinary Search after a confirmed missing selector and explicit disabled authority', async () => {
+        const client = createApiClient({});
+        client.getJSON.mockRejectedValue({ status: 404 });
+        const connections = createConnections(null, client);
+        connections.readFreshSessionAuthority.mockImplementation(() => ({
+            serverId: 'server-1', userId: client.getCurrentUserId(), accessToken: client.accessToken(),
+            selectorEnabled: false, authorityRevision: 4, envelope: null
+        }));
+        const application = new WebSessionSwitchApplication(connections);
+
+        const result = await application.prepareProtectedRoute(client);
+
+        expect(result.selector).toBeNull();
+        expect(application.captureVerifiedRoutePresentation(client)?.isCurrent()).toBe(true);
+    });
+
     it('rejects a selector-enabled authority captured after a disabled bootstrap', async () => {
         const client = createApiClient({ IsEnabled: false, IsCurrentUserOwner: false, OwnerUserId: null });
         const connections = createConnections(null, client);
@@ -125,6 +141,21 @@ describe('verified route presentation readiness', () => {
             connections.forceEnvelope(createSessionSwitchEnvelope(active));
             return result;
         });
+
+        await application.prepareProtectedRoute(client);
+
+        expect(application.captureVerifiedRoutePresentation(client)).toBeNull();
+    });
+
+    it.each([ undefined, true ])('rejects missing-selector bootstrap with availability %s', async availability => {
+        const client = createApiClient({});
+        client.getJSON.mockRejectedValue({ status: 404 });
+        const connections = createConnections(null, client);
+        connections.readFreshSessionAuthority.mockImplementation(() => ({
+            serverId: 'server-1', userId: client.getCurrentUserId(), accessToken: client.accessToken(),
+            selectorEnabled: availability, authorityRevision: 4, envelope: null
+        }));
+        const application = new WebSessionSwitchApplication(connections);
 
         await application.prepareProtectedRoute(client);
 

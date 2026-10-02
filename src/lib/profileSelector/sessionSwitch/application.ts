@@ -235,7 +235,7 @@ export class WebSessionSwitchApplication {
         if (sameBinding) {
             const context = this.getContext(this.createScope(apiClient.serverId()));
             const port = this.captureBoundSessionRead(apiClient);
-            const selectorEnabled = result.selector?.IsEnabled;
+            const selectorEnabled = result.selector === null ? false : result.selector.IsEnabled;
             const authority = this.connections.readFreshSessionAuthority(apiClient.serverId());
             if (port && typeof selectorEnabled === 'boolean'
                 && authority?.selectorEnabled === selectorEnabled
