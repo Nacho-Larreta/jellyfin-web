@@ -354,6 +354,10 @@ describe('Quick Connect login diagnostics and polling lifecycle', () => {
 
             const errorDialog = dialogs.at(-1);
             expect(errorDialog.element.id).toMatch(/-error$/);
+            expect(mocks.dialogShow.mock.lastCall[0].dialogOptions).toMatchObject({
+                id: errorDialog.element.id,
+                enableHistory: false
+            });
             errorDialog.element.dispatchEvent(new Event('closing'));
             errorDialog.result.reject(createSensitiveFailure());
             await flushPromises();
@@ -389,6 +393,10 @@ describe('Quick Connect login diagnostics and polling lifecycle', () => {
         const session = authenticateQuickConnect(apiClient, '/home');
 
         await expect(session.started).resolves.toBe(true);
+        expect(mocks.dialogShow.mock.lastCall[0].dialogOptions).toMatchObject({
+            id: dialogs[0].element.id,
+            enableHistory: false
+        });
         await vi.advanceTimersByTimeAsync(5_000);
 
         expectOnlyDiagnostic('poll-or-connect-failed');

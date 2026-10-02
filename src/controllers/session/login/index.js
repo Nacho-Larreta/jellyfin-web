@@ -50,6 +50,23 @@ function closeQuickConnectDialog(dialogId) {
     }
 }
 
+function closeQuickConnectDialogOnEscape(event) {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    dialogHelper.close(event.currentTarget);
+}
+
+function restoreQuickConnectFocus(initiatingControl, isAttemptCurrent) {
+    if (!isAttemptCurrent() || !initiatingControl?.isConnected
+        || document.querySelector('.dialogContainer .dialog.opened')) return;
+
+    const activeElement = document.activeElement;
+    if (activeElement === document.body || !activeElement?.isConnected) {
+        initiatingControl.focus();
+    }
+}
+
 function routeToSessionRecovery(error) {
     if (!(error instanceof SessionSwitchRecoveryRequiredError)) return false;
     Dashboard.navigate('/home');
@@ -88,7 +105,7 @@ async function authenticateUserByName(page, apiClient, url, username, password, 
     }
 }
 
-function createQuickConnectSession(apiClient, targetUrl, isAttemptCurrent) {
+function createQuickConnectSession(apiClient, targetUrl, isAttemptCurrent, initiatingControl) {
     let cancelled = false;
     let completing = false;
     let pollTimer = null;
@@ -120,7 +137,7 @@ function createQuickConnectSession(apiClient, targetUrl, isAttemptCurrent) {
             await appRouter.ready();
             if (errorDialogOwner !== owner || !isAttemptCurrent()) return;
             const result = dialog.show({
-                dialogOptions: { id: errorDialogId },
+                dialogOptions: { id: errorDialogId, enableHistory: false },
                 title: globalize.translate('HeaderError'),
                 text: globalize.translate(messageKey),
                 buttons: [{
@@ -129,8 +146,12 @@ function createQuickConnectSession(apiClient, targetUrl, isAttemptCurrent) {
                     type: 'submit'
                 }]
             });
+            document.getElementById(errorDialogId)?.addEventListener('keydown', closeQuickConnectDialogOnEscape);
             const onSettled = () => {
-                if (errorDialogOwner === owner) errorDialogOwner = null;
+                if (errorDialogOwner === owner) {
+                    errorDialogOwner = null;
+                    restoreQuickConnectFocus(initiatingControl, isAttemptCurrent);
+                }
             };
             void Promise.resolve(result).then(onSettled, onSettled);
         } catch {
@@ -191,7 +212,8 @@ function createQuickConnectSession(apiClient, targetUrl, isAttemptCurrent) {
             if (!isCurrent()) return false;
             const dialogResult = dialog.show({
                 dialogOptions: {
-                    id: dialogId
+                    id: dialogId,
+                    enableHistory: false
                 },
                 title: globalize.translate('QuickConnect'),
                 text: globalize.translate('QuickConnectAuthorizeCode', json.Code),
@@ -203,9 +225,11 @@ function createQuickConnectSession(apiClient, targetUrl, isAttemptCurrent) {
             });
             const onDialogSettled = () => {
                 if (!completing && !cancelled) cancel();
+                if (!completing) restoreQuickConnectFocus(initiatingControl, isAttemptCurrent);
             };
             void Promise.resolve(dialogResult).then(onDialogSettled, onDialogSettled);
             const dialogElement = document.getElementById(dialogId);
+            dialogElement.addEventListener('keydown', closeQuickConnectDialogOnEscape);
             dialogElement.addEventListener('closing', () => {
                 if (!completing && !cancelled) finish(false);
             }, { once: true });
@@ -224,8 +248,8 @@ function createQuickConnectSession(apiClient, targetUrl, isAttemptCurrent) {
     return { cancel, start };
 }
 
-export function authenticateQuickConnect(apiClient, targetUrl, isAttemptCurrent = () => true) {
-    const session = createQuickConnectSession(apiClient, targetUrl, isAttemptCurrent);
+export function authenticateQuickConnect(apiClient, targetUrl, isAttemptCurrent = () => true, initiatingControl) {
+    const session = createQuickConnectSession(apiClient, targetUrl, isAttemptCurrent, initiatingControl);
     const started = session.start().catch(() => {
         session.cancel();
         reportQuickConnectDiagnostic(QUICK_CONNECT_DIAGNOSTICS.initiateFailed);
@@ -409,7 +433,7 @@ export default function (view, params) {
     });
     view.querySelector('.btnQuick').addEventListener('click', function () {
         const isCurrent = beginLoginAttempt();
-        quickConnectSession = authenticateQuickConnect(getApiClient(), getTargetUrl(), isCurrent);
+        quickConnectSession = authenticateQuickConnect(getApiClient(), getTargetUrl(), isCurrent, this);
         return false;
     });
     view.querySelector('.btnManual').addEventListener('click', function () {
