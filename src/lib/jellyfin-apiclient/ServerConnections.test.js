@@ -284,11 +284,32 @@ describe('ServerConnections session envelope adapter', () => {
             .toMatchObject({ kind: 'PendingSwitch' });
     });
 
-    function arrangeLoginPublication(provider = createProvider(), lockManager) {
+    function arrangeLoginPublication(provider = createProvider({
+        ProfileSelectorEnabled: false,
+        SessionSwitchEnvelope: null
+    }), lockManager) {
         const connections = createConnections(provider, lockManager);
         const apiClient = { serverId: () => 'server-1' };
-        const activeApiClient = { ensureWebSocket: vi.fn() };
-        connections.installAuthenticationBinding = vi.fn(() => activeApiClient);
+        let activeUserId = null;
+        let activeToken = null;
+        let activeAddress = 'https://server';
+        const activeApiClient = {
+            accessToken: () => activeToken,
+            deviceId: () => 'device-1',
+            ensureWebSocket: vi.fn(),
+            getCurrentUserId: () => activeUserId,
+            reportCapabilities: vi.fn().mockResolvedValue(undefined),
+            serverAddress: () => activeAddress,
+            setServerAddress: address => { activeAddress = address; },
+            serverId: () => 'server-1'
+        };
+        connections.installAuthenticationBinding = vi.fn((_server, token, userId) => {
+            activeToken = token;
+            activeUserId = userId;
+            return activeApiClient;
+        });
+        connections.getApiClient = vi.fn(() => activeApiClient);
+        connections.currentApiClient = vi.fn(() => activeApiClient);
         connections.bootstrapAuthenticatedUser = vi.fn().mockResolvedValue(undefined);
         connections.publishLocalUserState = vi.fn().mockResolvedValue(undefined);
         const result = {
@@ -319,6 +340,8 @@ describe('ServerConnections session envelope adapter', () => {
         expect(connections.bootstrapAuthenticatedUser.mock.invocationCallOrder[0])
             .toBeLessThan(connections.publishLocalUserState.mock.invocationCallOrder[0]);
         expect(activeApiClient.ensureWebSocket).toHaveBeenCalledOnce();
+        expect(activeApiClient.reportCapabilities).toHaveBeenCalledOnce();
+        expect(activeApiClient.reportCapabilities).toHaveBeenCalledWith(connections.capabilities());
         expect(signedIn).toHaveBeenCalledOnce();
     });
 
@@ -360,7 +383,7 @@ describe('ServerConnections session envelope adapter', () => {
     });
 
     it('does not publish sign-in after logout wins during bootstrap', async () => {
-        const { connections, apiClient, provider, result } = arrangeLoginPublication();
+        const { connections, apiClient, activeApiClient, provider, result } = arrangeLoginPublication();
         const bootstrap = createDeferred();
         connections.bootstrapAuthenticatedUser.mockReturnValue(bootstrap.promise);
         const signedIn = vi.fn();
@@ -377,7 +400,73 @@ describe('ServerConnections session envelope adapter', () => {
         await expect(publication).rejects.toBeInstanceOf(ConcurrentSessionWriteError);
         expect(provider.state().Servers[0].AccessToken).toBeNull();
         expect(connections.publishLocalUserState).not.toHaveBeenCalled();
+        expect(activeApiClient.reportCapabilities).not.toHaveBeenCalled();
         expect(signedIn).not.toHaveBeenCalled();
+    });
+
+    it('does not advertise capabilities when a later authority revision wins during publication', async () => {
+        const { connections, apiClient, activeApiClient, provider, result } = arrangeLoginPublication();
+        const publicationSink = createDeferred();
+        connections.publishLocalUserState.mockReturnValue(publicationSink.promise);
+        const publication = connections.publishLoginAuthentication(apiClient, result, {
+            expectedAuthorityRevision: connections.captureLoginAuthority('server-1'),
+            isCurrent: () => true
+        });
+        await vi.waitFor(() => expect(connections.publishLocalUserState).toHaveBeenCalledOnce());
+
+        const nextCredentials = provider.state();
+        nextCredentials.Servers[0].SessionSwitchAuthorityRevision += 1;
+        provider.appStorage.setItem(provider.key, JSON.stringify(nextCredentials));
+        publicationSink.resolve();
+
+        await expect(publication).rejects.toBeInstanceOf(ConcurrentSessionWriteError);
+        expect(activeApiClient.reportCapabilities).not.toHaveBeenCalled();
+    });
+
+    it('does not advertise capabilities after the active client changes during publication', async () => {
+        const { connections, apiClient, activeApiClient, result } = arrangeLoginPublication();
+        const publicationSink = createDeferred();
+        connections.publishLocalUserState.mockReturnValue(publicationSink.promise);
+        const publication = connections.publishLoginAuthentication(apiClient, result, {
+            expectedAuthorityRevision: connections.captureLoginAuthority('server-1'),
+            isCurrent: () => true
+        });
+        await vi.waitFor(() => expect(connections.publishLocalUserState).toHaveBeenCalledOnce());
+
+        connections.currentApiClient.mockReturnValue({});
+        publicationSink.resolve();
+
+        await expect(publication).rejects.toThrow();
+        expect(activeApiClient.reportCapabilities).not.toHaveBeenCalled();
+    });
+
+    it('does not advertise capabilities when the installed server address changes during publication', async () => {
+        const { connections, apiClient, activeApiClient, result } = arrangeLoginPublication();
+        const publicationSink = createDeferred();
+        connections.publishLocalUserState.mockReturnValue(publicationSink.promise);
+        const publication = connections.publishLoginAuthentication(apiClient, result, {
+            expectedAuthorityRevision: connections.captureLoginAuthority('server-1'),
+            isCurrent: () => true
+        });
+        await vi.waitFor(() => expect(connections.publishLocalUserState).toHaveBeenCalledOnce());
+
+        activeApiClient.setServerAddress('https://other-server');
+        publicationSink.resolve();
+
+        await expect(publication).rejects.toThrow();
+        expect(activeApiClient.reportCapabilities).not.toHaveBeenCalled();
+    });
+
+    it('does not hold sign-in open when the capability report is rejected', async () => {
+        const { connections, apiClient, activeApiClient, result } = arrangeLoginPublication();
+        activeApiClient.reportCapabilities.mockRejectedValueOnce(new Error('capability report unavailable'));
+
+        await connections.publishLoginAuthentication(apiClient, result, {
+            expectedAuthorityRevision: connections.captureLoginAuthority('server-1'),
+            isCurrent: () => true
+        });
+
+        expect(activeApiClient.reportCapabilities).toHaveBeenCalledOnce();
     });
 
     it('finishes auth publication when viewhide cancels UI after the durable sink', async () => {
@@ -951,6 +1040,7 @@ describe('ServerConnections session envelope adapter', () => {
         }));
         expect(observed).toHaveBeenCalledOnce();
         expect(observed).toHaveBeenCalledWith(null);
+        expect(apiClient.reportCapabilities).toHaveBeenCalledOnce();
     });
 
     it('revokes durable session authority when real connection validation rejects detached cached auth', async () => {

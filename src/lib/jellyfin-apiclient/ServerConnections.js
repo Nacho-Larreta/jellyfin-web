@@ -734,9 +734,16 @@ export class ServerConnections extends ConnectionManager {
         const user = { ...result.User, ServerId: serverId };
         await this.bootstrapAuthenticatedUser(user, { assertCurrent, acceptSessionWrite });
         assertCurrent();
+        const admittedRead = getWebSessionSwitchApplication(this).captureBoundSessionRead(activeApiClient);
+        if (!admittedRead) {
+            throw new SessionSwitchRecoveryRequiredError('capability-admission');
+        }
         activeApiClient.ensureWebSocket();
         await this.publishLocalUserState(user, assertCurrent);
         assertCurrent();
+        admittedRead.assertCurrent();
+        void Promise.resolve(activeApiClient.reportCapabilities(this.capabilities()))
+            .catch(() => undefined);
         Events.trigger(this, 'localusersignedin', [user]);
         return activeApiClient;
     }
