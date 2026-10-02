@@ -34,6 +34,7 @@ import { setBackdropTransparency, TRANSPARENCY_LEVEL } from '../../../components
 import { pluginManager } from '../../../components/pluginManager';
 import { PluginType } from '../../../types/plugin.ts';
 import { PlayerPointerActivityController } from './pointerActivityController.ts';
+import { samePlaybackIdentity } from '../../../components/htmlMediaLifecycle';
 
 function getOpenedDialog() {
     return document.querySelector('.dialogContainer .dialog.opened');
@@ -509,8 +510,53 @@ export default function (view) {
     function onPlaybackStart(e, state) {
         console.debug('nowplaying event: ' + e.type);
         const player = this;
+        rememberPlaybackExecution(player);
         onStateChanged.call(player, e, state);
         resetUpNextDialog();
+    }
+
+    function rememberPlaybackExecution(player) {
+        if (!player.supportsPlaybackLifecycle) return;
+
+        const identity = player.streamInfo?.playbackIdentity;
+        if (identity && (playbackExecution?.player !== player
+                || !samePlaybackIdentity(playbackExecution.identity, identity))) {
+            playbackExecution = { player, identity };
+            pendingPlaybackReturn = null;
+        }
+    }
+
+    async function returnFromPlayback(execution) {
+        let returned = false;
+        try {
+            await appRouter.ready();
+            const activePlayer = playbackManager.getCurrentPlayer();
+            // A newer route transition wins; back() would otherwise await and close it.
+            if (!viewIsActive || playbackExecution !== execution || appRouter.promiseShow
+                    || (activePlayer && (activePlayer !== execution.player
+                        || !samePlaybackIdentity(activePlayer.streamInfo?.playbackIdentity, execution.identity)))) return;
+
+            view.removeEventListener('viewbeforehide', onViewHideStopPlayback);
+            await appRouter.back();
+            returned = true;
+        } finally {
+            if (!returned && pendingPlaybackReturn === execution) pendingPlaybackReturn = null;
+        }
+    }
+
+    function onManagerPlaybackStopped(e, stopInfo) {
+        const player = stopInfo?.player;
+        const execution = playbackExecution;
+        if (!viewIsActive || !player?.supportsPlaybackLifecycle || !execution
+                || execution.player !== player
+                || !samePlaybackIdentity(execution.identity, stopInfo.playbackIdentity)
+                || stopInfo.nextMediaType === 'Video'
+                || pendingPlaybackReturn === execution) return;
+
+        currentRuntimeTicks = null;
+        resetUpNextDialog();
+        pendingPlaybackReturn = execution;
+        returnFromPlayback(execution).catch(error => console.error(error));
     }
 
     function resetUpNextDialog() {
@@ -524,6 +570,8 @@ export default function (view) {
     }
 
     function onPlaybackStopped(e, state) {
+        if (this.supportsPlaybackLifecycle) return;
+
         currentRuntimeTicks = null;
         resetUpNextDialog();
         console.debug('nowplaying event: ' + e.type);
@@ -557,6 +605,7 @@ export default function (view) {
             if (!player) return;
         }
         const state = playbackManager.getPlayerState(player);
+        rememberPlaybackExecution(player);
         onStateChanged.call(player, {
             type: 'init'
         }, state);
@@ -1593,6 +1642,9 @@ export default function (view) {
     shell.enableFullscreen();
 
     let currentPlayer;
+    let playbackExecution;
+    let pendingPlaybackReturn;
+    let viewIsActive = false;
     let comingUpNextDisplayed;
     let currentUpNextDialog;
     let isEnabled;
@@ -1646,12 +1698,16 @@ export default function (view) {
     });
     view.addEventListener('viewshow', function () {
         try {
+            viewIsActive = true;
+            playbackExecution = null;
+            pendingPlaybackReturn = null;
             releasePointerActivityOwnership?.();
             releasePointerActivityOwnership = mouseManager.claimPointerActivity(
                 (event) => pointerActivityController.onPointerMove(event)
             );
             pointerActivityController.start();
             Events.on(playbackManager, 'playerchange', onPlayerChange);
+            Events.on(playbackManager, 'playbackstop', onManagerPlaybackStopped);
             bindToPlayer(playbackManager.getCurrentPlayer());
             inputManager.on(window, onInputCommand);
             document.addEventListener('keydown', onKeyDown);
@@ -1693,6 +1749,9 @@ export default function (view) {
         }
     });
     view.addEventListener('viewbeforehide', function () {
+        viewIsActive = false;
+        playbackExecution = null;
+        pendingPlaybackReturn = null;
         if (statsOverlay) {
             statsOverlay.enabled(false);
         }
@@ -1737,6 +1796,7 @@ export default function (view) {
         headerElement.classList.remove('osdHeader-hidden');
         inputManager.off(window, onInputCommand);
         Events.off(playbackManager, 'playerchange', onPlayerChange);
+        Events.off(playbackManager, 'playbackstop', onManagerPlaybackStopped);
         releaseCurrentPlayer();
     });
     view.querySelector('.btnFullscreen').addEventListener('click', function () {

@@ -3516,7 +3516,8 @@ export class PlaybackManager {
                 player: player,
                 state: state,
                 nextItem: (nextItem ? nextItem.item : null),
-                nextMediaType: nextMediaType
+                nextMediaType: nextMediaType,
+                playbackIdentity: player.supportsPlaybackLifecycle ? streamInfo?.playbackIdentity : undefined
             };
 
             state.NextMediaType = nextMediaType;
