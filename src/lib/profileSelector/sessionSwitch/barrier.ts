@@ -168,7 +168,9 @@ function createMutationLease(
             if (!settled) {
                 settled = true;
                 mutation.settle(outcome);
-                activeMutations.delete(mutation);
+                if (outcome !== 'Unknown') {
+                    activeMutations.delete(mutation);
+                }
             }
         }
     });

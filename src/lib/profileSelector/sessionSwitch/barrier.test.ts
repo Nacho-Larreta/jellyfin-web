@@ -17,22 +17,24 @@ describe('SessionAdmissionBarrier', () => {
         expect(() => barrier.admit(oldSession, 'read')).toThrow(SessionSwitchInProgressError);
     });
 
-    it('waits for old mutations to receive a classified settlement', async () => {
-        const barrier = new SessionAdmissionBarrier();
-        const mutation = barrier.admit(oldSession, 'mutation');
-        barrier.close('switch-1');
+    it.each(['Acknowledged', 'Rejected', 'NotApplied'] as const)(
+        'waits for old mutations to receive a classified %s settlement', async outcome => {
+            const barrier = new SessionAdmissionBarrier();
+            const mutation = barrier.admit(oldSession, 'mutation');
+            barrier.close('switch-1');
 
-        const drained = barrier.drainMutations();
-        let finished = false;
-        void drained.then(() => {
-            finished = true;
-        });
-        await Promise.resolve();
-        expect(finished).toBe(false);
+            const drained = barrier.drainMutations();
+            let finished = false;
+            void drained.then(() => {
+                finished = true;
+            });
+            await Promise.resolve();
+            expect(finished).toBe(false);
 
-        mutation.settle('Acknowledged');
-        await expect(drained).resolves.toBeUndefined();
-    });
+            mutation.settle(outcome);
+            await expect(drained).resolves.toBeUndefined();
+        }
+    );
 
     it('blocks commit when an old mutation has an unclassified outcome', async () => {
         const barrier = new SessionAdmissionBarrier();
@@ -43,6 +45,56 @@ describe('SessionAdmissionBarrier', () => {
         mutation.settle('Unknown');
 
         await expect(drained).rejects.toThrow('unclassified outcome');
+    });
+
+    it('rejects a drain started after a mutation settled with an unknown outcome', async () => {
+        const barrier = new SessionAdmissionBarrier();
+        const mutation = barrier.admit(oldSession, 'mutation');
+        mutation.settle('Unknown');
+        barrier.close('switch-1');
+
+        await expect(barrier.drainMutations()).rejects.toThrow('unclassified outcome');
+    });
+
+    it('retains an unknown outcome across repeated drains and reopening admission', async () => {
+        const barrier = new SessionAdmissionBarrier();
+        const mutation = barrier.admit(oldSession, 'mutation');
+        barrier.close('switch-1');
+        mutation.settle('Unknown');
+
+        await expect(barrier.drainMutations()).rejects.toThrow('unclassified outcome');
+        barrier.reopen('switch-1');
+        const newSession = createActiveProfileSession('server-1', 'device-1', 'new-user', 'new-token', 5);
+        barrier.synchronize(createSessionSwitchEnvelope(newSession));
+        barrier.close('switch-2');
+        await expect(barrier.drainMutations()).rejects.toThrow('unclassified outcome');
+    });
+
+    it('rejects a mixed batch while allowing classified mutations to drain', async () => {
+        const barrier = new SessionAdmissionBarrier();
+        const acknowledged = barrier.admit(oldSession, 'mutation');
+        const rejected = barrier.admit(oldSession, 'mutation');
+        const notApplied = barrier.admit(oldSession, 'mutation');
+        const unknown = barrier.admit(oldSession, 'mutation');
+        barrier.close('switch-1');
+
+        const drained = barrier.drainMutations();
+        acknowledged.settle('Acknowledged');
+        rejected.settle('Rejected');
+        notApplied.settle('NotApplied');
+        unknown.settle('Unknown');
+
+        await expect(drained).rejects.toThrow('unclassified outcome');
+        await expect(barrier.drainMutations()).rejects.toThrow('unclassified outcome');
+    });
+
+    it('does not let duplicate settlement turn an unknown outcome into success', async () => {
+        const barrier = new SessionAdmissionBarrier();
+        const mutation = barrier.admit(oldSession, 'mutation');
+        mutation.settle('Unknown');
+        mutation.settle('Acknowledged');
+
+        await expect(barrier.drainMutations()).rejects.toThrow('unclassified outcome');
     });
 
     it('rejects late side effects captured under an old epoch', () => {
