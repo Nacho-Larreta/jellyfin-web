@@ -1,4 +1,5 @@
 import { AppFeature } from 'constants/appFeature';
+import escapeHtml from 'escape-html';
 import Events from '../../utils/events.ts';
 import browser from '../../scripts/browser';
 import loading from '../loading/loading';
@@ -144,7 +145,7 @@ function disconnectFromPlayer(currentDeviceName) {
 
         dialog.show({
             buttons: menuItems,
-            text: globalize.translate('ConfirmEndPlayerSession', currentDeviceName)
+            text: globalize.translate('ConfirmEndPlayerSession', escapeHtml(currentDeviceName))
 
         }).then(function (id) {
             switch (id) {
@@ -185,9 +186,7 @@ function showActivePlayerMenuInternal(playerInfo) {
     const currentDeviceName = (playerInfo.deviceName || playerInfo.name);
 
     html += '<div class="promptDialogContent" style="padding:1.5em;">';
-    html += '<h2 style="margin-top:.5em;">';
-    html += currentDeviceName;
-    html += '</h2>';
+    html += '<h2 class="promptDialogDeviceName" style="margin-top:.5em;"></h2>';
 
     html += '<div>';
 
@@ -217,6 +216,7 @@ function showActivePlayerMenuInternal(playerInfo) {
 
     html += '</div>';
     dlg.innerHTML = html;
+    dlg.querySelector('.promptDialogDeviceName').textContent = currentDeviceName;
 
     const chkMirror = dlg.querySelector('.chkMirror');
 
