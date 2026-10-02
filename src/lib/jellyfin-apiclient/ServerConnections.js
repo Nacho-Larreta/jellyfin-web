@@ -205,11 +205,11 @@ export class ServerConnections extends ConnectionManager {
         });
     }
 
-    initApiClient(server) {
+    initApiClient(serverAddress) {
         console.debug('creating ApiClient singleton');
 
         const apiClient = new ApiClient(
-            createApiClientServerInfo(server),
+            serverAddress,
             appHost.appName(),
             appHost.appVersion(),
             appHost.deviceName(),
@@ -888,9 +888,13 @@ export class ServerConnections extends ConnectionManager {
     }
 
     createIsolatedSessionApiClient(server, session) {
+        const serverAddress = this.getApiClient(server.Id)?.serverAddress?.();
+        if (typeof serverAddress !== 'string' || !serverAddress) {
+            throw new TypeError('[ServerConnection] Current server address is required for isolated session');
+        }
         const serverInfo = createApiClientServerInfo(server);
         const apiClient = new ApiClient(
-            serverInfo,
+            serverAddress,
             appHost.appName(),
             appHost.appVersion(),
             appHost.deviceName(),

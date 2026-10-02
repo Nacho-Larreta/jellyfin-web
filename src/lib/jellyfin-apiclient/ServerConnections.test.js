@@ -912,6 +912,7 @@ describe('ServerConnections session envelope adapter', () => {
             closeWebSocket: vi.fn(),
             ensureWebSocket: vi.fn(),
             getCurrentUserId: () => 'old-user',
+            serverAddress: () => 'https://jellyfin.example',
             serverInfo: vi.fn(),
             setAuthenticationInfo: vi.fn()
         };
@@ -939,7 +940,8 @@ describe('ServerConnections session envelope adapter', () => {
         expect(oldApiClient.setAuthenticationInfo).not.toHaveBeenCalled();
         expect(await connections.getInstalledSessionUser('server-1')).toEqual({ Id: 'target-user' });
 
-        const serverDto = isolatedApiClient.constructorArgs[0];
+        expect(isolatedApiClient.constructorArgs[0]).toBe('https://jellyfin.example');
+        const serverDto = isolatedApiClient.serverInfo.mock.lastCall[0];
         expect(serverDto).toEqual(expect.objectContaining({
             Id: 'server-1',
             UserId: 'target-user'
