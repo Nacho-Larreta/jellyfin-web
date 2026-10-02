@@ -73,7 +73,7 @@ vi.mock('elements/emby-checkbox/emby-checkbox', () => ({}));
 import ConnectionRequired from 'components/ConnectionRequired';
 import { createRouterHistory } from 'components/router/routerHistory';
 import { handleCommand } from 'scripts/inputManager';
-import createLoginController from './index';
+import createLoginController from '../controllers/session/login/index';
 
 const loginHtml = readFileSync('src/controllers/session/login/index.html', 'utf8');
 
