@@ -486,7 +486,7 @@
     gap: clamp(0.75rem, 1vw, 1rem);
     overflow-x: auto;
     overflow-y: hidden;
-    padding: 0.15rem 0 0.45rem;
+    padding: var(--jf-semantic-space-2);
     scrollbar-width: none;
 }
 
@@ -592,6 +592,12 @@
 .tvHomeLibraryChip:hover::after,
 .tvHomeLibraryChip:focus::after {
     opacity: 1;
+}
+
+.tvHomeDashboard .tvHomeLibraryChip:focus-visible:not([aria-disabled="true"]):not(.disabled) {
+    outline: var(--jf-semantic-space-1) solid var(--jf-semantic-focus-indicator) !important;
+    outline-offset: calc(var(--jf-semantic-space-1) / 2);
+    box-shadow: 0 0 0 calc(var(--jf-semantic-space-1) + var(--jf-semantic-space-1) / 2) var(--jf-semantic-focus-separator);
 }
 
 .tvHomeLibraryChip__icon {
