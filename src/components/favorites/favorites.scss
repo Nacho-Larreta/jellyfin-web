@@ -7,6 +7,12 @@
     pointer-events: none;
 }
 
+#favoritesTab .cardImageContainer.cardContent.itemAction:focus-visible {
+    outline: var(--jf-semantic-space-1) solid var(--jf-semantic-focus-indicator) !important;
+    outline-offset: calc(var(--jf-semantic-space-1) / 2);
+    box-shadow: 0 0 0 calc(var(--jf-semantic-space-1) + var(--jf-semantic-space-1) / 2) var(--jf-semantic-focus-separator);
+}
+
 .favoriteSectionsStatus {
     padding-block: 1rem;
 }
