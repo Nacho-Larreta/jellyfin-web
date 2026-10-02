@@ -1,4 +1,7 @@
 import { ImageType } from '@jellyfin/sdk/lib/generated-client/models/image-type';
+import { ItemFields } from '@jellyfin/sdk/lib/generated-client/models/item-fields';
+import { MediaType } from '@jellyfin/sdk/lib/generated-client/models/media-type';
+import { CancelledError } from '@tanstack/react-query';
 import type { BaseItemDto } from '@jellyfin/sdk/lib/generated-client/models/base-item-dto';
 import type { ApiClient } from 'jellyfin-apiclient';
 import escapeHtml from 'escape-html';
@@ -9,28 +12,29 @@ import datetime from 'scripts/datetime';
 import globalize from 'lib/globalize';
 import { getItemBackdropImageUrl } from 'utils/jellyfin-apiclient/backdropImage';
 
-const RESUME_HERO_FIELDS = [
-    'PrimaryImageAspectRatio',
-    'Overview',
-    'Genres',
-    'ProductionYear',
-    'RunTimeTicks',
-    'OfficialRating',
-    'CommunityRating',
-    'ParentId',
-    'MediaSourceCount'
-].join(',');
+import type { HomeSessionRead } from './homeSessionRead';
 
-function getResumeItem(apiClient: ApiClient): Promise<BaseItemDto | undefined> {
-    return apiClient.getResumableItems(apiClient.getCurrentUserId(), {
-        Limit: 1,
-        Recursive: true,
-        Fields: RESUME_HERO_FIELDS,
-        ImageTypeLimit: 1,
-        EnableImageTypes: 'Primary,Backdrop,Thumb',
-        EnableTotalRecordCount: false,
-        MediaTypes: 'Video'
-    }).then(result => result.Items?.[0]);
+const RESUME_HERO_FIELDS = [
+    ItemFields.PrimaryImageAspectRatio,
+    ItemFields.Overview,
+    ItemFields.Genres,
+    ItemFields.ParentId,
+    ItemFields.MediaSourceCount
+];
+
+function getResumeItem(session: HomeSessionRead): Promise<BaseItemDto | undefined> {
+    return session.read.getResumeItems({
+        userId: session.user.Id,
+        limit: 1,
+        fields: RESUME_HERO_FIELDS,
+        imageTypeLimit: 1,
+        enableImageTypes: [ ImageType.Primary, ImageType.Backdrop, ImageType.Thumb ],
+        enableTotalRecordCount: false,
+        mediaTypes: [ MediaType.Video ]
+    }).then(result => {
+        session.assertCurrent();
+        return result.Items?.[0];
+    });
 }
 
 function getPrimaryImageUrl(apiClient: ApiClient, item: BaseItemDto): string | undefined {
@@ -257,28 +261,36 @@ export function destroyTvHomeHero(elem: HTMLElement) {
     elem.classList.add('hide');
 }
 
-export function loadTvHomeHero(elem: HTMLElement | null, apiClient: ApiClient): Promise<void> {
+export function loadTvHomeHero(elem: HTMLElement | null, session: HomeSessionRead): Promise<void> {
     if (!elem) {
         return Promise.resolve();
     }
 
-    return getResumeItem(apiClient)
+    return getResumeItem(session)
         .then(item => {
+            session.assertCurrent();
             if (!item) {
                 destroyTvHomeHero(elem);
                 return;
             }
 
-            elem.innerHTML = getHeroHtml(apiClient, item);
+            elem.innerHTML = getHeroHtml(session.apiClient, item);
             elem.classList.remove('hide');
 
             const playButton = elem.querySelector('.btnTvHomeHeroPlay');
             playButton?.addEventListener('click', () => {
-                playItem(item, apiClient.serverId());
+                try {
+                    session.assertCurrent();
+                    playItem(item, session.apiClient.serverId());
+                } catch (error) {
+                    if (!(error instanceof CancelledError)) throw error;
+                }
             });
         })
         .catch(err => {
-            console.error('[tvHomeHero] Failed to load resume hero', err);
+            if (err instanceof CancelledError) throw err;
+            session.assertCurrent();
+            console.error('[tvHomeHero] Failed to load resume hero');
             destroyTvHomeHero(elem);
         });
 }

@@ -1,115 +1,101 @@
-import * as userSettings from '../scripts/settings/userSettings';
+import { CancelledError } from '@tanstack/react-query';
+
 import focusManager from '../components/focusManager';
-import homeSections from '../components/homesections/homesections';
-import { destroyTvHomeDashboard, loadTvHomeDashboard } from '../components/homesections/sections/tvHomeDashboard';
+import { destroyTvHomeDashboard, loadTvHomeDashboard, showUnavailableTvHomeDashboard } from '../components/homesections/sections/tvHomeDashboard';
 import { destroyTvHomeHero, loadTvHomeHero } from '../components/homesections/sections/tvHomeHero';
 import { ServerConnections } from 'lib/jellyfin-apiclient';
+import { getWebSessionSwitchApplication } from 'lib/profileSelector/sessionSwitch/application';
+import { createSessionScopedReadApi, SessionReadCancelledError } from 'utils/jellyfin-apiclient/sessionReadApi';
 
 import '../elements/emby-itemscontainer/emby-itemscontainer';
 
 class HomeTab {
-    constructor(view, params) {
+    constructor(view) {
         this.view = view;
-        this.params = params;
-        this.apiClient = ServerConnections.currentApiClient();
         this.heroElement = view.querySelector('.tvHomeHero');
         this.dashboardElement = view.querySelector('.tvHomeDashboard');
-        this.sectionsContainer = view.querySelector('.sections');
-        view.querySelector('.sections').addEventListener('settingschange', onHomeScreenSettingsChanged.bind(this));
+        this.generation = 0;
+        this.paused = true;
     }
+
     onResume(options) {
-        const heroPromise = loadTvHomeHero(this.heroElement, this.apiClient);
-        const dashboardElement = this.dashboardElement;
-
-        if (dashboardElement) {
-            this.destroyHomeSections();
-            this.sectionsRendered = false;
-
-            return Promise.all([
-                heroPromise,
-                loadTvHomeDashboard(dashboardElement, this.apiClient)
-                    .catch(err => {
-                        console.error('[HomeTab] Custom TV home failed; falling back to legacy home sections', err);
-                        destroyTvHomeDashboard(dashboardElement);
-                        return this.apiClient.getCurrentUser()
-                            .then(user => homeSections.loadSections(this.sectionsContainer, this.apiClient, user, userSettings));
-                    })
-            ])
-                .then(() => {
-                    if (options.autoFocus) {
-                        focusManager.autoFocus(this.view);
-                    }
-                });
+        const generation = ++this.generation;
+        this.paused = false;
+        const apiClient = ServerConnections.currentApiClient();
+        let port;
+        try {
+            port = apiClient && getWebSessionSwitchApplication(ServerConnections).captureBoundSessionRead(apiClient);
+        } catch {
+            port = null;
         }
 
-        if (this.sectionsRendered) {
-            const sectionsContainer = this.sectionsContainer;
+        if (!apiClient || !port) {
+            this.clear();
+            showUnavailableTvHomeDashboard(this.dashboardElement);
+            return Promise.resolve();
+        }
+        const read = createSessionScopedReadApi(apiClient, port);
 
-            if (sectionsContainer) {
-                return Promise.all([
-                    heroPromise,
-                    homeSections.resume(sectionsContainer, options)
-                ]);
+        const assertCurrent = () => {
+            if (this.paused || this.generation !== generation || !this.view) {
+                throw new SessionReadCancelledError();
             }
-
-            return heroPromise;
+            read.assertCurrent();
+        };
+        try {
+            assertCurrent();
+        } catch (error) {
+            if (error instanceof CancelledError) {
+                this.clear();
+                showUnavailableTvHomeDashboard(this.dashboardElement);
+                return Promise.resolve();
+            }
+            throw error;
         }
 
-        const view = this.view;
-        const apiClient = this.apiClient;
-        this.destroyHomeSections();
-        this.sectionsRendered = true;
-        return Promise.all([
-            heroPromise,
-            apiClient.getCurrentUser()
-                .then(user => homeSections.loadSections(view.querySelector('.sections'), apiClient, user, userSettings))
-        ])
-            .then(() => {
-                if (options.autoFocus) {
-                    focusManager.autoFocus(view);
-                }
-            }).catch(err => {
-                console.error(err);
-            });
+        this.clear();
+        return read.getCurrentUser().then(user => {
+            assertCurrent();
+            if (!user?.Id || user.Id !== read.identity.profileUserId
+                || user.ServerId && user.ServerId !== read.identity.serverId) {
+                throw new SessionReadCancelledError();
+            }
+            const homeRead = { apiClient, read, user, assertCurrent };
+            return Promise.all([
+                loadTvHomeHero(this.heroElement, homeRead),
+                loadTvHomeDashboard(this.dashboardElement, homeRead)
+            ]);
+        }).then(() => {
+            assertCurrent();
+            if (options.autoFocus) focusManager.autoFocus(this.view);
+        }).catch(error => {
+            if (error instanceof CancelledError) return;
+            try {
+                assertCurrent();
+            } catch {
+                return;
+            }
+            console.error('[HomeTab] Failed to load Home');
+            showUnavailableTvHomeDashboard(this.dashboardElement);
+        });
     }
+
     onPause() {
-        const sectionsContainer = this.sectionsContainer;
-
-        if (sectionsContainer) {
-            homeSections.pause(sectionsContainer);
-        }
+        this.generation++;
+        this.paused = true;
+        this.clear();
     }
+
     destroy() {
+        this.onPause();
         this.view = null;
-        this.params = null;
-        this.apiClient = null;
-        this.destroyHomeSections();
-        if (this.dashboardElement) {
-            destroyTvHomeDashboard(this.dashboardElement);
-        }
-        if (this.heroElement) {
-            destroyTvHomeHero(this.heroElement);
-        }
         this.heroElement = null;
         this.dashboardElement = null;
-        this.sectionsContainer = null;
     }
-    destroyHomeSections() {
-        const sectionsContainer = this.sectionsContainer;
 
-        if (sectionsContainer) {
-            homeSections.destroySections(sectionsContainer);
-        }
-    }
-}
-
-function onHomeScreenSettingsChanged() {
-    this.sectionsRendered = false;
-
-    if (!this.paused) {
-        this.onResume({
-            refresh: true
-        });
+    clear() {
+        destroyTvHomeDashboard(this.dashboardElement);
+        if (this.heroElement) destroyTvHomeHero(this.heroElement);
     }
 }
 

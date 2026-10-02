@@ -1,4 +1,7 @@
 import { ImageType } from '@jellyfin/sdk/lib/generated-client/models/image-type';
+import { ItemFields } from '@jellyfin/sdk/lib/generated-client/models/item-fields';
+import { MediaType } from '@jellyfin/sdk/lib/generated-client/models/media-type';
+import { CancelledError } from '@tanstack/react-query';
 import type { BaseItemDto } from '@jellyfin/sdk/lib/generated-client/models/base-item-dto';
 import type { UserDto } from '@jellyfin/sdk/lib/generated-client/models/user-dto';
 import escapeHtml from 'escape-html';
@@ -6,12 +9,11 @@ import type { ApiClient } from 'jellyfin-apiclient';
 
 import { appRouter } from 'components/router/appRouter';
 import { JellyflixCollectionType, isAdultVideosCollectionType } from 'constants/jellyflixCollectionTypes';
-import { getUserViewsQuery } from 'hooks/useUserViews';
 import Dashboard from 'utils/dashboard';
 import { getItemBackdropImageUrl } from 'utils/jellyfin-apiclient/backdropImage';
-import { toApi } from 'utils/jellyfin-apiclient/compat';
 import { queryClient } from 'utils/query/queryClient';
 import globalize from 'lib/globalize';
+import type { HomeSessionRead } from './homeSessionRead';
 import {
     aggregateHomeSectionResults,
     getHomeLoadState,
@@ -20,24 +22,12 @@ import {
 } from './homeLoadState';
 
 const TV_HOME_FIELDS = [
-    'PrimaryImageAspectRatio',
-    'Overview',
-    'ProductionYear',
-    'RunTimeTicks',
-    'OfficialRating',
-    'CommunityRating',
-    'DateCreated',
-    'ParentId',
-    'ParentIndexNumber',
-    'IndexNumber',
-    'SeriesName',
-    'ParentBackdropItemId',
-    'ParentBackdropImageTags',
-    'ParentPrimaryImageItemId',
-    'ParentPrimaryImageTag',
-    'SeriesPrimaryImageTag',
-    'MediaSourceCount'
-].join(',');
+    ItemFields.PrimaryImageAspectRatio,
+    ItemFields.Overview,
+    ItemFields.DateCreated,
+    ItemFields.ParentId,
+    ItemFields.MediaSourceCount
+];
 
 const EXCLUDED_LIBRARY_TYPES = new Set([
     'livetv',
@@ -68,14 +58,18 @@ type LibraryViewModel = {
     adult: boolean;
 };
 
-function getCurrentUser(apiClient: ApiClient): Promise<UserDto> {
-    return apiClient.getCurrentUser();
-}
-
-function getUserViews(apiClient: ApiClient, userId: string): Promise<BaseItemDto[]> {
+function getUserViews(session: HomeSessionRead): Promise<BaseItemDto[]> {
+    const { serverId, profileUserId, sessionEpoch, authorityGeneration } = session.read.identity;
     return queryClient
-        .fetchQuery(getUserViewsQuery(toApi(apiClient), userId))
-        .then(result => result.Items || []);
+        .fetchQuery({
+            queryKey: [ 'Home', 'UserViews', serverId, profileUserId, sessionEpoch, authorityGeneration ],
+            queryFn: ({ signal }) => session.read.getUserViews({ userId: profileUserId }, signal),
+            staleTime: 1000
+        })
+        .then(result => {
+            session.assertCurrent();
+            return result.Items || [];
+        });
 }
 
 function isAdultLibrary(item: BaseItemDto): boolean {
@@ -451,36 +445,43 @@ function renderRailSection(
     return html;
 }
 
-function getResumeItems(apiClient: ApiClient): Promise<BaseItemDto[]> {
-    return apiClient.getResumableItems(apiClient.getCurrentUserId(), {
-        Limit: 12,
-        Recursive: true,
-        Fields: TV_HOME_FIELDS,
-        ImageTypeLimit: 1,
-        EnableImageTypes: 'Primary,Backdrop,Thumb',
-        EnableTotalRecordCount: false,
-        MediaTypes: 'Video'
-    }).then(result => result.Items || []);
+function getResumeItems(session: HomeSessionRead): Promise<BaseItemDto[]> {
+    return session.read.getResumeItems({
+        userId: session.read.identity.profileUserId,
+        limit: 12,
+        fields: TV_HOME_FIELDS,
+        imageTypeLimit: 1,
+        enableImageTypes: [ ImageType.Primary, ImageType.Backdrop, ImageType.Thumb ],
+        enableTotalRecordCount: false,
+        mediaTypes: [ MediaType.Video ]
+    }).then(result => {
+        session.assertCurrent();
+        return result.Items || [];
+    });
 }
 
-function getNextUpItems(apiClient: ApiClient): Promise<BaseItemDto[]> {
+function getNextUpItems(session: HomeSessionRead): Promise<BaseItemDto[]> {
     const oldestDateForNextUp = new Date();
     oldestDateForNextUp.setDate(oldestDateForNextUp.getDate() - 365);
 
-    return apiClient.getNextUpEpisodes({
-        Limit: 12,
-        Fields: TV_HOME_FIELDS,
-        UserId: apiClient.getCurrentUserId(),
-        ImageTypeLimit: 1,
-        EnableImageTypes: 'Primary,Backdrop,Banner,Thumb',
-        EnableTotalRecordCount: false,
-        NextUpDateCutoff: oldestDateForNextUp.toISOString(),
-        EnableResumable: false,
-        EnableRewatching: true
-    }).then(result => result.Items || []);
+    return session.read.getNextUp({
+        userId: session.read.identity.profileUserId,
+        limit: 12,
+        fields: TV_HOME_FIELDS,
+        imageTypeLimit: 1,
+        enableImageTypes: [ ImageType.Primary, ImageType.Backdrop, ImageType.Banner, ImageType.Thumb ],
+        enableTotalRecordCount: false,
+        nextUpDateCutoff: oldestDateForNextUp.toISOString(),
+        enableResumable: false,
+        enableRewatching: true
+    }).then(result => {
+        session.assertCurrent();
+        return result.Items || [];
+    });
 }
 
-function getLatestItems(apiClient: ApiClient, libraries: BaseItemDto[], user: UserDto): Promise<HomeSectionAggregation<BaseItemDto>> {
+function getLatestItems(session: HomeSessionRead, libraries: BaseItemDto[]): Promise<HomeSectionAggregation<BaseItemDto>> {
+    const { user } = session;
     const excludedIds = new Set(user.Configuration?.LatestItemsExcludes || []);
     const eligibleLibraries = libraries.filter(item => {
         if (!item.Id || excludedIds.has(item.Id)) {
@@ -490,15 +491,21 @@ function getLatestItems(apiClient: ApiClient, libraries: BaseItemDto[], user: Us
         return !RECENT_LIBRARY_EXCLUDES.has((item.CollectionType || '').toLowerCase());
     });
 
-    return Promise.allSettled(eligibleLibraries.map(library => apiClient.getLatestItems({
-        Limit: 8,
-        Fields: TV_HOME_FIELDS,
-        ImageTypeLimit: 1,
-        EnableImageTypes: 'Primary,Backdrop,Thumb',
-        ParentId: library.Id
+    return Promise.allSettled(eligibleLibraries.map(library => session.read.getLatestMedia({
+        userId: session.read.identity.profileUserId,
+        limit: 8,
+        fields: TV_HOME_FIELDS,
+        imageTypeLimit: 1,
+        enableImageTypes: [ ImageType.Primary, ImageType.Backdrop, ImageType.Thumb ],
+        parentId: library.Id
     })))
-        .then(aggregateHomeSectionResults)
+        .then(results => {
+            session.assertCurrent();
+            throwIfSessionCancelled(results);
+            return aggregateHomeSectionResults(results);
+        })
         .then(({ items, status }) => {
+            session.assertCurrent();
             const sortedItems = [...items].sort((a, b) => {
                 const left = a.DateCreated ? new Date(a.DateCreated).getTime() : 0;
                 const right = b.DateCreated ? new Date(b.DateCreated).getTime() : 0;
@@ -511,6 +518,12 @@ function getLatestItems(apiClient: ApiClient, libraries: BaseItemDto[], user: Us
                 status
             };
         });
+}
+
+function throwIfSessionCancelled(results: PromiseSettledResult<unknown>[]): void {
+    const cancelled = results.find(result => result.status === 'rejected'
+        && result.reason instanceof CancelledError);
+    if (cancelled?.status === 'rejected') throw cancelled.reason;
 }
 
 function getSettledItems(result: PromiseSettledResult<BaseItemDto[]>): BaseItemDto[] {
@@ -585,53 +598,67 @@ export function destroyTvHomeDashboard(elem: HTMLElement | null) {
     setWithoutResumeHeroState(elem, false);
 }
 
-export function loadTvHomeDashboard(elem: HTMLElement | null, apiClient: ApiClient): Promise<void> {
+export function showUnavailableTvHomeDashboard(elem: HTMLElement | null) {
+    if (!elem) return;
+    elem.innerHTML = renderLoadState('error');
+    elem.classList.remove('hide', 'is-loading');
+}
+
+export function loadTvHomeDashboard(elem: HTMLElement | null, session: HomeSessionRead): Promise<void> {
     if (!elem) {
         return Promise.resolve();
     }
 
+    session.assertCurrent();
     elem.classList.add('is-loading');
 
-    return getCurrentUser(apiClient)
-        .then(user => Promise.all([
-            Promise.resolve(user),
-            getUserViews(apiClient, user.Id || apiClient.getCurrentUserId())
-        ]))
-        .then(([user, libraries]) => Promise.allSettled([
-            getResumeItems(apiClient),
-            getNextUpItems(apiClient),
-            getLatestItems(apiClient, libraries, user)
-        ]).then(([resumeItems, nextUpItems, latestItems]) => {
-            const latestSection = latestItems.status === 'fulfilled' ? latestItems.value : {
-                items: [],
-                status: 'rejected' as const
-            };
+    return getUserViews(session)
+        .then(libraries => {
+            session.assertCurrent();
+            return Promise.allSettled([
+                getResumeItems(session),
+                getNextUpItems(session),
+                getLatestItems(session, libraries)
+            ]).then(([resumeItems, nextUpItems, latestItems]) => {
+                session.assertCurrent();
+                throwIfSessionCancelled([ resumeItems, nextUpItems, latestItems ]);
+                const latestSection = latestItems.status === 'fulfilled' ? latestItems.value : {
+                    items: [],
+                    status: 'rejected' as const
+                };
 
-            return {
-                user,
-                libraries,
-                sectionStatuses: [ resumeItems.status, nextUpItems.status, latestSection.status ],
-                resumeItems: getSettledItems(resumeItems),
-                nextUpItems: getSettledItems(nextUpItems),
-                latestItems: latestSection.items
-            };
-        }))
+                return {
+                    user: session.user,
+                    libraries,
+                    sectionStatuses: [ resumeItems.status, nextUpItems.status, latestSection.status ],
+                    resumeItems: getSettledItems(resumeItems),
+                    nextUpItems: getSettledItems(nextUpItems),
+                    latestItems: latestSection.items
+                };
+            });
+        })
         .then(({ user, libraries, sectionStatuses, resumeItems, nextUpItems, latestItems }) => {
+            session.assertCurrent();
             const hasMedia = Boolean(resumeItems.length || nextUpItems.length || latestItems.length);
             const loadState = getHomeLoadState(Boolean(getVisibleLibraries(libraries).length), sectionStatuses, hasMedia);
-            elem.innerHTML = renderDashboard(apiClient, user, libraries, resumeItems, nextUpItems, latestItems, loadState);
+            elem.innerHTML = renderDashboard(session.apiClient, user, libraries, resumeItems, nextUpItems, latestItems, loadState);
             setWithoutResumeHeroState(elem, !resumeItems.length);
             elem.classList.remove('hide');
             elem.classList.remove('is-loading');
 
             elem.querySelector('.btnTvHomeManageLibraries')?.addEventListener('click', () => {
-                void Dashboard.navigate('dashboard/libraries');
+                try {
+                    session.assertCurrent();
+                    void Dashboard.navigate('dashboard/libraries');
+                } catch (error) {
+                    if (!(error instanceof CancelledError)) throw error;
+                }
             });
         })
         .catch(err => {
-            elem.innerHTML = renderLoadState('error');
-            elem.classList.remove('hide');
-            elem.classList.remove('is-loading');
-            console.error('Failed to load TV Home dashboard.', err);
+            if (err instanceof CancelledError) throw err;
+            session.assertCurrent();
+            showUnavailableTvHomeDashboard(elem);
+            console.error('Failed to load TV Home dashboard.');
         });
 }

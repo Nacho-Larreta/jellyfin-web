@@ -7,7 +7,7 @@ import { createBoundSessionReadPort, type FreshSessionAuthority } from 'lib/prof
 import { createActiveProfileSession } from 'lib/profileSelector/sessionSwitch/model';
 import { createSessionSwitchEnvelope } from 'lib/profileSelector/sessionSwitch/store';
 
-import { createSessionScopedReadApi } from './sessionReadApi';
+import { createSessionScopedReadApi, relativeSessionReadPath } from './sessionReadApi';
 
 const serverId = 'server-1';
 const deviceId = 'device-1';
@@ -60,6 +60,14 @@ function successTransport() {
 }
 
 describe('session scoped Search SDK transport', () => {
+    it('accepts only exact descendants of the captured server base path', () => {
+        expect(relativeSessionReadPath('/jellyfin/Items', '/jellyfin')).toBe('/Items');
+        expect(relativeSessionReadPath('/jellyfin/Items', '/jellyfin/')).toBe('/Items');
+        expect(relativeSessionReadPath('/Items', '/')).toBe('/Items');
+        expect(relativeSessionReadPath('/jellyfin-other/Items', '/jellyfin')).toBeNull();
+        expect(relativeSessionReadPath('/another/Items', '/jellyfin')).toBeNull();
+    });
+
     it('does not reuse a query generation when a server is removed and re-added at the same revision', () => {
         const removed = setup(false);
         const previous = removed.createPort();
@@ -108,6 +116,90 @@ describe('session scoped Search SDK transport', () => {
         })).toBe(true);
     });
 
+    it('routes only the four inspected Home GET operations under the captured user', async () => {
+        const scope = setup();
+        const transport = successTransport();
+        const read = createSessionScopedReadApi(scope.client, scope.createPort(), transport);
+
+        await read.getUserViews({ userId });
+        await read.getResumeItems({ userId });
+        await read.getNextUp({ userId });
+        await read.getLatestMedia({ userId });
+
+        expect(transport.mock.calls.map(([config]) => new URL(config.url!).pathname)).toEqual([
+            '/jellyfin/UserViews',
+            '/jellyfin/UserItems/Resume',
+            '/jellyfin/Shows/NextUp',
+            '/jellyfin/Items/Latest'
+        ]);
+        expect(transport.mock.calls.every(([config]) => config.method === 'get'
+            && new URL(config.url!).searchParams.getAll('userId').length === 1
+            && new URL(config.url!).searchParams.get('userId') === userId
+            && typeof config.headers.get('Authorization') === 'string')).toBe(true);
+
+        await expect(read.getUserViews({ userId: 'other' })).rejects.toBeInstanceOf(CancelledError);
+        await expect(read.getResumeItems({ userId: 'other' })).rejects.toBeInstanceOf(CancelledError);
+        await expect(read.getNextUp({ userId: 'other' })).rejects.toBeInstanceOf(CancelledError);
+        await expect(read.getLatestMedia({ userId: 'other' })).rejects.toBeInstanceOf(CancelledError);
+        expect(transport).toHaveBeenCalledTimes(4);
+    });
+
+    it('reads only the captured current user from the exact Users/Me route', async () => {
+        const scope = setup();
+        const transport = vi.fn<AxiosAdapter>(async config => ({
+            data: { Id: userId, ServerId: serverId },
+            status: 200,
+            statusText: 'OK',
+            headers: {},
+            config
+        }));
+        const read = createSessionScopedReadApi(scope.client, scope.createPort(), transport);
+
+        await expect(read.getCurrentUser()).resolves.toMatchObject({ Id: userId, ServerId: serverId });
+        const request = new URL(transport.mock.calls[0][0].url!);
+        expect(request.pathname).toBe('/jellyfin/Users/Me');
+        expect(request.search).toBe('');
+        expect(transport.mock.calls[0][0].method).toBe('get');
+
+        transport.mockImplementationOnce(async config => ({
+            data: { Id: 'other-user', ServerId: serverId },
+            status: 200,
+            statusText: 'OK',
+            headers: {},
+            config
+        }));
+        await expect(read.getCurrentUser()).rejects.toBeInstanceOf(CancelledError);
+        transport.mockImplementationOnce(async config => ({
+            data: { Id: userId, ServerId: 'other-server' },
+            status: 200,
+            statusText: 'OK',
+            headers: {},
+            config
+        }));
+        await expect(read.getCurrentUser()).rejects.toBeInstanceOf(CancelledError);
+    });
+
+    it('fences a late Users/Me response after its captured authority closes', async () => {
+        const scope = setup();
+        let resolve!: (value: Awaited<ReturnType<AxiosAdapter>>) => void;
+        const transport = vi.fn<AxiosAdapter>(() => new Promise(yes => {
+            resolve = yes;
+        }));
+        const read = createSessionScopedReadApi(scope.client, scope.createPort(), transport);
+        const pending = read.getCurrentUser();
+        await vi.waitFor(() => expect(transport).toHaveBeenCalledOnce());
+
+        scope.barrier.close('switch-home');
+        resolve({
+            data: { Id: userId, ServerId: serverId },
+            status: 200,
+            statusText: 'OK',
+            headers: {},
+            config: transport.mock.calls[0][0]
+        });
+        await expect(pending).rejects.toBeInstanceOf(CancelledError);
+    });
+
     it('rejects wrong user binding and exposes no raw SDK mutation or override surface', async () => {
         const scope = setup();
         const transport = successTransport();
@@ -115,7 +207,10 @@ describe('session scoped Search SDK transport', () => {
 
         await expect(read.getItems({ userId: 'other' })).rejects.toBeInstanceOf(CancelledError);
         expect(Object.keys(read).sort((left, right) => left.localeCompare(right)))
-            .toEqual(['assertCurrent', 'getArtists', 'getItems', 'getPersons', 'identity']);
+            .toEqual([
+                'assertCurrent', 'getArtists', 'getCurrentUser', 'getItems', 'getLatestMedia', 'getNextUp',
+                'getPersons', 'getResumeItems', 'getUserViews', 'identity'
+            ]);
         expect(Reflect.get(read, 'api')).toBeUndefined();
         expect(Reflect.get(read, 'post')).toBeUndefined();
         expect(Reflect.get(read, 'update')).toBeUndefined();
