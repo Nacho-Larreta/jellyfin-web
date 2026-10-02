@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { type ProfileSwitchApiPort } from './api';
 import { WebSessionSwitchApplication } from './application';
+import { type FreshSessionAuthority } from './boundRequests';
 import {
     ConcurrentSessionWriteError,
     SessionStorageCorruptionError,
@@ -56,12 +57,12 @@ function createConnections(initial: SessionSwitchEnvelope | null, apiClient: Ret
         }),
         clearInstalledSession: vi.fn(),
         discardStagedSession: vi.fn(),
-        currentApiClient: vi.fn(() => apiClient),
-        getApiClient: vi.fn(() => apiClient),
+        currentApiClient: vi.fn((): ReturnType<typeof createApiClient> | null => apiClient),
+        getApiClient: vi.fn((): ReturnType<typeof createApiClient> | null => apiClient),
         getInstalledSessionUser: vi.fn(() => apiClient.getCurrentUser()),
         getSessionDeviceId: () => 'device-1',
         getSessionSwitchEnvelope: vi.fn(() => envelope === null ? null : cloneEnvelope(envelope)),
-        readFreshSessionAuthority: vi.fn(() => ({
+        readFreshSessionAuthority: vi.fn((): FreshSessionAuthority | null => ({
             serverId: 'server-1',
             userId: apiClient.getCurrentUserId(),
             accessToken: apiClient.accessToken(),
@@ -111,6 +112,144 @@ const enabledSecondarySelector = {
     OwnerUserId: 'owner-user',
     Profiles: []
 };
+
+describe('verified route presentation readiness', () => {
+    it('rejects a selector-enabled authority captured after a disabled bootstrap', async () => {
+        const client = createApiClient({ IsEnabled: false, IsCurrentUserOwner: false, OwnerUserId: null });
+        const connections = createConnections(null, client);
+        const application = new WebSessionSwitchApplication(connections);
+        const bootstrap = application.bootstrapAuthenticatedSession.bind(application);
+        vi.spyOn(application, 'bootstrapAuthenticatedSession').mockImplementation(async apiClient => {
+            const result = await bootstrap(apiClient);
+            const active = createActiveProfileSession('server-1', 'device-1', 'owner-user', 'owner-token', 3);
+            connections.forceEnvelope(createSessionSwitchEnvelope(active));
+            return result;
+        });
+
+        await application.prepareProtectedRoute(client);
+
+        expect(application.captureVerifiedRoutePresentation(client)).toBeNull();
+    });
+
+    it('does not grant Search presentation after a failed runtime identity verification', async () => {
+        const client = createApiClient(enabledSecondarySelector, 'secondary-user', 'secondary-token');
+        const active = createActiveProfileSession('server-1', 'device-1', 'secondary-user', 'secondary-token', 3);
+        const connections = createConnections(createSessionSwitchEnvelope(active), client);
+        connections.getInstalledSessionUser.mockResolvedValue({ Id: 'other-user', ServerId: 'server-1' });
+        const application = new WebSessionSwitchApplication(connections);
+
+        await expect(application.prepareProtectedRoute(client)).rejects.toThrow();
+        expect(application.captureVerifiedRoutePresentation(client)).toBeNull();
+    });
+
+    it('requires a completed bootstrap and closes on changed client, credential, profile or epoch', async () => {
+        const client = createApiClient(enabledSecondarySelector, 'secondary-user', 'secondary-token');
+        const active = createActiveProfileSession('server-1', 'device-1', 'secondary-user', 'secondary-token', 3);
+        const connections = createConnections(createSessionSwitchEnvelope(active), client);
+        const application = new WebSessionSwitchApplication(connections);
+
+        expect(application.captureVerifiedRoutePresentation(client)).toBeNull();
+        await application.prepareProtectedRoute(client);
+        const grant = application.captureVerifiedRoutePresentation(client);
+        expect(grant?.isCurrent()).toBe(true);
+
+        const fresh = connections.readFreshSessionAuthority()!;
+        connections.readFreshSessionAuthority.mockReturnValueOnce({
+            ...fresh,
+            authorityRevision: fresh.authorityRevision + 1
+        });
+        expect(grant?.isCurrent()).toBe(false);
+        connections.readFreshSessionAuthority.mockReturnValueOnce(null);
+        expect(grant?.isCurrent()).toBe(false);
+        connections.getApiClient.mockReturnValueOnce(null);
+        expect(grant?.isCurrent()).toBe(false);
+        const deviceId = vi.spyOn(connections, 'getSessionDeviceId').mockReturnValueOnce('other-device');
+        expect(grant?.isCurrent()).toBe(false);
+        deviceId.mockRestore();
+        connections.currentApiClient.mockReturnValueOnce(null);
+        expect(grant?.isCurrent()).toBe(false);
+        client.install('other-user', 'other-token');
+        expect(grant?.isCurrent()).toBe(false);
+        expect(application.captureVerifiedRoutePresentation(client)).toBeNull();
+
+        client.install('secondary-user', 'secondary-token');
+        const advanced = createActiveProfileSession('server-1', 'device-1', 'secondary-user', 'secondary-token', 4);
+        connections.forceEnvelope(createSessionSwitchEnvelope(advanced));
+        expect(grant?.isCurrent()).toBe(false);
+    });
+
+    it('closes synchronously on a pending marker and notifies presentation subscribers', async () => {
+        const client = createApiClient(enabledSecondarySelector, 'secondary-user', 'secondary-token');
+        const active = createActiveProfileSession('server-1', 'device-1', 'secondary-user', 'secondary-token', 3);
+        const connections = createConnections(createSessionSwitchEnvelope(active), client);
+        const application = new WebSessionSwitchApplication(connections);
+        await application.prepareProtectedRoute(client);
+        const grant = application.captureVerifiedRoutePresentation(client);
+        expect(grant?.isCurrent()).toBe(true);
+        const onChange = vi.fn();
+        const unsubscribe = application.subscribeRoutePresentation('server-1', onChange);
+        const before = application.readRoutePresentationVersion('server-1');
+        const stored = connections.readEnvelope()!;
+
+        await connections.replaceSessionSwitchEnvelope('server-1', stored.revision, {
+            ...stored,
+            revision: stored.revision + 1,
+            marker: {
+                kind: 'PendingSwitch', phase: 'Preparing', switchId: 'switch-1',
+                serverId: 'server-1', deviceId: 'device-1', oldProfileUserId: 'secondary-user',
+                oldEpoch: 3, targetProfileUserId: 'other-user', coordinatorId: 'coordinator-1',
+                fencingToken: 1, leaseExpiresAtMs: 1000, updatedAtMs: 0
+            }
+        });
+
+        expect(grant?.isCurrent()).toBe(false);
+        expect(application.readRoutePresentationVersion('server-1')).toBeGreaterThan(before);
+        expect(onChange).toHaveBeenCalled();
+
+        const marked = connections.readEnvelope()!;
+        await connections.replaceSessionSwitchEnvelope('server-1', marked.revision, {
+            ...stored,
+            revision: marked.revision + 1
+        });
+        expect(grant?.isCurrent()).toBe(false);
+        unsubscribe();
+    });
+
+    it('requires explicit selector-disabled authority and refuses an identity replaced during bootstrap', async () => {
+        const client = createApiClient({ IsEnabled: false, IsCurrentUserOwner: false, OwnerUserId: null });
+        const connections = createConnections(null, client);
+        connections.readFreshSessionAuthority.mockImplementation(() => ({
+            serverId: 'server-1', userId: client.getCurrentUserId(), accessToken: client.accessToken(),
+            selectorEnabled: false, authorityRevision: 4, envelope: null
+        }));
+        const application = new WebSessionSwitchApplication(connections);
+        await application.prepareProtectedRoute(client);
+        const grant = application.captureVerifiedRoutePresentation(client);
+        expect(grant?.isCurrent()).toBe(true);
+
+        connections.readFreshSessionAuthority.mockImplementation(() => ({
+            serverId: 'server-1', userId: client.getCurrentUserId(), accessToken: client.accessToken(),
+            selectorEnabled: undefined, authorityRevision: 4, envelope: null
+        }));
+        expect(grant?.isCurrent()).toBe(false);
+        expect(application.captureVerifiedRoutePresentation(client)).toBeNull();
+
+        let finishSelector!: (value: { IsEnabled: boolean; IsCurrentUserOwner: boolean; OwnerUserId: null }) => void;
+        client.getJSON.mockReturnValue(new Promise(resolve => {
+            finishSelector = resolve;
+        }));
+        connections.readFreshSessionAuthority.mockImplementation(() => ({
+            serverId: 'server-1', userId: client.getCurrentUserId(), accessToken: client.accessToken(),
+            selectorEnabled: false, authorityRevision: 5, envelope: null
+        }));
+        const delayed = application.prepareProtectedRoute(client);
+        await vi.waitFor(() => expect(client.getJSON).toHaveBeenCalledTimes(2));
+        client.install('owner-user', 'replacement-token');
+        finishSelector({ IsEnabled: false, IsCurrentUserOwner: false, OwnerUserId: null });
+        await delayed;
+        expect(application.captureVerifiedRoutePresentation(client)).toBeNull();
+    });
+});
 
 describe('WebSessionSwitchApplication bound reads', () => {
     it('synchronizes an existing durable envelope before its first read admission', () => {

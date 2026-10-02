@@ -83,7 +83,20 @@ interface SessionContext {
     readonly store: AtomicSessionSwitchStore;
     readonly barrier: SessionAdmissionBarrier;
     readInitialized: boolean;
+    routeReadiness: RouteReadiness | null;
     observationVersion(): number;
+    presentationVersion(): number;
+    subscribePresentation(listener: () => void): () => void;
+}
+
+interface RouteReadiness {
+    readonly client: ProfileSwitchApiClient;
+    readonly port: BoundSessionReadPort;
+    readonly selectorEnabled: boolean;
+}
+
+export interface RoutePresentationGrant {
+    isCurrent(): boolean;
 }
 
 export interface ProfileSessionBootstrapResult {
@@ -155,6 +168,38 @@ export class WebSessionSwitchApplication {
         return this.getContext(this.createScope(serverId)).barrier.subscribe(listener);
     }
 
+    readRoutePresentationVersion(serverId: string): number {
+        const deviceId = this.connections.getSessionDeviceId();
+        return this.contexts.get(`${serverId}:${deviceId}`)?.presentationVersion() ?? 0;
+    }
+
+    subscribeRoutePresentation(serverId: string, listener: () => void): () => void {
+        return this.getContext(this.createScope(serverId)).subscribePresentation(listener);
+    }
+
+    captureVerifiedRoutePresentation(client: ProfileSwitchApiClient): RoutePresentationGrant | null {
+        const serverId = client.serverId();
+        const context = this.contexts.get(`${serverId}:${this.connections.getSessionDeviceId()}`);
+        const ready = context?.routeReadiness;
+        if (!ready || ready.client !== client) return null;
+
+        let revoked = false;
+        const grant = Object.freeze({
+            isCurrent: () => {
+                if (revoked) return false;
+                try {
+                    ready.port.assertCurrent();
+                    if (!ready.selectorEnabled || context.runtime.isVerifiedSession(ready.port.binding)) return true;
+                } catch {
+                    // A route grant cannot be restored after its authority was observed invalid.
+                }
+                revoked = true;
+                return false;
+            }
+        });
+        return grant.isCurrent() ? grant : null;
+    }
+
     async bootstrapAuthenticatedSession(
         apiClient: ProfileSwitchApiClient,
         authenticatedUser?: AuthenticatedUser,
@@ -171,7 +216,38 @@ export class WebSessionSwitchApplication {
     }
 
     async prepareProtectedRoute(apiClient: ProfileSwitchApiClient): Promise<ProfileSessionBootstrapResult> {
-        return this.bootstrapAuthenticatedSession(apiClient);
+        const initialBinding = {
+            currentClient: this.connections.currentApiClient(),
+            registeredClient: this.connections.getApiClient(apiClient.serverId()),
+            serverId: apiClient.serverId(),
+            deviceId: apiClient.deviceId(),
+            userId: apiClient.getCurrentUserId(),
+            token: apiClient.accessToken()
+        };
+        const result = await this.bootstrapAuthenticatedSession(apiClient);
+        const sameBinding = initialBinding.currentClient === apiClient && initialBinding.registeredClient === apiClient
+            && this.connections.currentApiClient() === apiClient
+            && this.connections.getApiClient(initialBinding.serverId) === apiClient
+            && apiClient.serverId() === initialBinding.serverId
+            && apiClient.deviceId() === initialBinding.deviceId
+            && apiClient.getCurrentUserId() === initialBinding.userId
+            && apiClient.accessToken() === initialBinding.token;
+        if (sameBinding) {
+            const context = this.getContext(this.createScope(apiClient.serverId()));
+            const port = this.captureBoundSessionRead(apiClient);
+            const selectorEnabled = result.selector?.IsEnabled;
+            const authority = this.connections.readFreshSessionAuthority(apiClient.serverId());
+            if (port && typeof selectorEnabled === 'boolean'
+                && authority?.selectorEnabled === selectorEnabled
+                && port.binding.profileUserId === apiClient.getCurrentUserId()
+                && (selectorEnabled ? result.activeSession !== null
+                    && context.runtime.isVerifiedSession(result.activeSession)
+                    && context.runtime.isVerifiedSession(port.binding) : result.activeSession === null)) {
+                port.assertCurrent();
+                context.routeReadiness = { client: apiClient, port, selectorEnabled };
+            }
+        }
+        return result;
     }
 
     private async reconcile(
@@ -371,12 +447,22 @@ export class WebSessionSwitchApplication {
         const barrier = new SessionAdmissionBarrier();
         const runtime = new ServerConnectionsSessionRuntime(this.connections);
         let observationVersion = 0;
+        let presentationVersion = 0;
+        const presentationListeners = new Set<() => void>();
+        const notifyPresentation = () => {
+            presentationVersion += 1;
+            presentationListeners.forEach(listener => {
+                listener();
+            });
+        };
         store.subscribe(scope, observation => {
             observationVersion += 1;
             if (observation === null || 'kind' in observation) {
                 runtime.invalidate(scope.serverId);
             }
+            notifyPresentation();
         });
+        barrier.subscribe(notifyPresentation);
         const coordinator = new ProfileSessionSwitchCoordinator(scope, {
             coordinatorId: this.createCoordinatorId(),
             api: this.createApi(scope.serverId),
@@ -392,7 +478,13 @@ export class WebSessionSwitchApplication {
             store,
             barrier,
             readInitialized: false,
-            observationVersion: () => observationVersion
+            routeReadiness: null,
+            observationVersion: () => observationVersion,
+            presentationVersion: () => presentationVersion,
+            subscribePresentation: (listener: () => void) => {
+                presentationListeners.add(listener);
+                return () => presentationListeners.delete(listener);
+            }
         };
         this.contexts.set(key, context);
         return context;

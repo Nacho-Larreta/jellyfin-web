@@ -3,7 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
     RouteValidationAuthority,
     createConnectionRouteKey,
-    isAuthorizedRoute
+    isAuthorizedRoute,
+    isSearchQueryPresentationTransition
 } from './connectionRequiredRouteAuthority';
 
 describe('ConnectionRequired route validation authority', () => {
@@ -49,5 +50,41 @@ describe('ConnectionRequired route validation authority', () => {
 
         authorizedRouteKey = routeB;
         expect(isAuthorizedRoute(routeB, authorizedRouteKey)).toBe(true);
+    });
+
+    it('admits only a Search query edit as a presentation transition', () => {
+        const before = createConnectionRouteKey('user', 'a', '/search', '?genre=Family&query=Ca&parentId=library');
+        const after = createConnectionRouteKey('user', 'b', '/search', '?genre=Family&query=Cat&parentId=library');
+
+        expect(isSearchQueryPresentationTransition(before, after)).toBe(true);
+        expect(isSearchQueryPresentationTransition(before, createConnectionRouteKey(
+            'user', 'c', '/search', '?genre=Family&parentId=library'
+        ))).toBe(true);
+        expect(isSearchQueryPresentationTransition(before, createConnectionRouteKey(
+            'user', 'd', '/search', '?genre=Family&query=Cat&parentId=library&sort=date'
+        ))).toBe(false);
+        expect(isSearchQueryPresentationTransition(before, createConnectionRouteKey(
+            'user', 'e', '/search', '?parentId=library&query=Cat&genre=Family'
+        ))).toBe(false);
+        expect(isSearchQueryPresentationTransition(before, createConnectionRouteKey(
+            'user', 'f', '/search', '?genre=Family&query=Cat&parentId=library&genre=Family'
+        ))).toBe(false);
+        expect(isSearchQueryPresentationTransition(before, createConnectionRouteKey(
+            'admin', 'g', '/search', '?genre=Family&query=Cat&parentId=library'
+        ))).toBe(false);
+        expect(isSearchQueryPresentationTransition(before, createConnectionRouteKey(
+            'user', 'h', '/home', '?genre=Family&query=Cat&parentId=library'
+        ))).toBe(false);
+        expect(isSearchQueryPresentationTransition(null, after)).toBe(false);
+    });
+
+    it('does not let duplicate or reordered parameters conceal another change', () => {
+        const before = createConnectionRouteKey('user', 'a', '/search', '?query=Cat&tag=A&tag=B');
+        expect(isSearchQueryPresentationTransition(before, createConnectionRouteKey(
+            'user', 'b', '/search', '?query=Dog&tag=B&tag=A'
+        ))).toBe(false);
+        expect(isSearchQueryPresentationTransition(before, createConnectionRouteKey(
+            'user', 'c', '/search', '?query=Dog&query=Cat&tag=A&tag=B'
+        ))).toBe(false);
     });
 });

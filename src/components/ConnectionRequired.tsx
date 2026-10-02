@@ -1,17 +1,18 @@
-import React, { FunctionComponent, useEffect, useRef, useState } from 'react';
+import React, { FunctionComponent, useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import type { ApiClient, ConnectResponse } from 'jellyfin-apiclient';
 
 import { ConnectionState, ServerConnections } from 'lib/jellyfin-apiclient';
 import { resolveProfileSelectorRoute } from 'lib/profileSelector/navigation';
-import { getWebSessionSwitchApplication } from 'lib/profileSelector/sessionSwitch/application';
+import { getWebSessionSwitchApplication, type RoutePresentationGrant } from 'lib/profileSelector/sessionSwitch/application';
 import { PROFILE_SELECTOR_PATH } from 'lib/profileSelector/utils';
 
 import ConnectionErrorPage from './ConnectionErrorPage';
 import {
     RouteValidationAuthority,
     createConnectionRouteKey,
-    isAuthorizedRoute
+    isAuthorizedRoute,
+    isSearchQueryPresentationTransition
 } from './connectionRequiredRouteAuthority';
 import Loading from './loading/LoadingComponent';
 
@@ -106,7 +107,7 @@ const validateAdministrator = async (
 
 type RouteValidationState =
     | { readonly status: 'validating'; readonly routeKey: string }
-    | { readonly status: 'authorized'; readonly routeKey: string }
+    | { readonly status: 'authorized'; readonly routeKey: string; readonly presentationGrant?: RoutePresentationGrant }
     | { readonly status: 'error'; readonly routeKey: string; readonly connectionState: ConnectionState };
 
 /**
@@ -125,19 +126,48 @@ const ConnectionRequired: FunctionComponent<ConnectionRequiredProps> = ({
         location.pathname,
         location.search
     );
+    const isSearchRoute = level === AccessLevel.User && location.pathname === '/search';
+    const presentationApplication = isSearchRoute ? getWebSessionSwitchApplication(ServerConnections) : null;
+    const presentationServerId = isSearchRoute ? ServerConnections.currentApiClient()?.serverId() : undefined;
+    const subscribePresentation = useCallback((listener: () => void) =>
+        presentationApplication && presentationServerId ?
+            presentationApplication.subscribeRoutePresentation(presentationServerId, listener) :
+            () => undefined, [ presentationApplication, presentationServerId ]);
+    const presentationVersion = useCallback(() =>
+        presentationApplication && presentationServerId ?
+            presentationApplication.readRoutePresentationVersion(presentationServerId) :
+            0, [ presentationApplication, presentationServerId ]);
+    useSyncExternalStore(subscribePresentation, presentationVersion, () => 0);
     const routeAuthority = useRef(new RouteValidationAuthority());
     routeAuthority.current.observe(routeKey);
     const [ validation, setValidation ] = useState<RouteValidationState>({
         status: 'validating',
         routeKey
     });
+    const authorizedPresentation = validation.status === 'authorized' ? validation.presentationGrant : undefined;
+    const searchPresentationContinues = isSearchRoute
+        && isSearchQueryPresentationTransition(validation.routeKey, routeKey)
+        && authorizedPresentation?.isCurrent() === true;
+    const reusablePresentation = useRef<RoutePresentationGrant | null>(null);
+    reusablePresentation.current = searchPresentationContinues ? authorizedPresentation ?? null : null;
 
     useEffect(() => {
         const authority = routeAuthority.current;
         const ticket = authority.begin(routeKey);
         const isCurrent = () => authority.isCurrent(ticket);
-        const authorize = () => {
-            if (isCurrent()) setValidation({ status: 'authorized', routeKey });
+        const reusableGrant = reusablePresentation.current;
+        if (reusableGrant?.isCurrent()) {
+            setValidation({ status: 'authorized', routeKey, presentationGrant: reusableGrant });
+            return () => authority.invalidate(ticket);
+        }
+        const authorize = (presentationGrant?: RoutePresentationGrant) => {
+            if (!isCurrent()) return;
+            if (level === AccessLevel.User && location.pathname === '/search'
+                && !presentationGrant?.isCurrent()) {
+                setValidation({ status: 'error', routeKey, connectionState: ConnectionState.Unavailable });
+                return;
+            }
+            setValidation({ status: 'authorized', routeKey, presentationGrant });
         };
         const navigateCurrent = (target: string) => {
             if (isCurrent()) navigate(target);
@@ -221,6 +251,31 @@ const ConnectionRequired: FunctionComponent<ConnectionRequiredProps> = ({
             await getWebSessionSwitchApplication(ServerConnections).prepareProtectedRoute(client);
             return isCurrent();
         };
+        const resolveUserRoute = async (client: ApiClient | undefined): Promise<boolean> => {
+            if (level !== AccessLevel.User || location.pathname === PROFILE_SELECTOR_PATH) return true;
+            if (!client) throw new Error('No ApiClient available');
+            const currentPath = location.pathname + location.search;
+            const targetRoute = await resolveProfileSelectorRoute(client, currentPath);
+            if (!isCurrent()) return false;
+            if (targetRoute === currentPath) return true;
+            navigateCurrent(targetRoute);
+            return false;
+        };
+        const authorizeUserRoute = async (client: ApiClient | undefined) => {
+            if (level !== AccessLevel.User || location.pathname !== '/search') {
+                authorize();
+                return;
+            }
+            if (!client) throw new Error('No ApiClient available');
+            const application = getWebSessionSwitchApplication(ServerConnections);
+            let grant = application.captureVerifiedRoutePresentation(client);
+            if (!grant) {
+                await application.prepareProtectedRoute(client);
+                if (!isCurrent()) return;
+                grant = application.captureVerifiedRoutePresentation(client);
+            }
+            authorize(grant ?? undefined);
+        };
         const validateUserAccess = async () => {
             const client = ServerConnections.currentApiClient();
             const protectedRoute = level === AccessLevel.Admin || level === AccessLevel.User;
@@ -236,17 +291,8 @@ const ConnectionRequired: FunctionComponent<ConnectionRequiredProps> = ({
                 async () => bounce(await ServerConnections.connect())
             )) return;
 
-            if (level === AccessLevel.User && location.pathname !== PROFILE_SELECTOR_PATH) {
-                if (!client) throw new Error('No ApiClient available');
-                const currentPath = location.pathname + location.search;
-                const targetRoute = await resolveProfileSelectorRoute(client, currentPath);
-                if (!isCurrent()) return;
-                if (targetRoute !== currentPath) {
-                    navigateCurrent(targetRoute);
-                    return;
-                }
-            }
-            authorize();
+            if (!await resolveUserRoute(client) || !isCurrent()) return;
+            await authorizeUserRoute(client);
         };
         const run = async () => {
             if (isCurrent()) setValidation({ status: 'validating', routeKey });
@@ -276,6 +322,9 @@ const ConnectionRequired: FunctionComponent<ConnectionRequiredProps> = ({
 
         void run().catch(() => {
             if (isCurrent()) {
+                setValidation(level === AccessLevel.User && location.pathname === '/search' ?
+                    { status: 'error', routeKey, connectionState: ConnectionState.Unavailable } :
+                    { status: 'validating', routeKey });
                 console.error('[ConnectionRequired] route validation failed');
             }
         });
@@ -289,7 +338,9 @@ const ConnectionRequired: FunctionComponent<ConnectionRequiredProps> = ({
     }
 
     const authorizedRouteKey = validation.status === 'authorized' ? validation.routeKey : null;
-    if (!isAuthorizedRoute(routeKey, authorizedRouteKey)) {
+    const grantCurrent = !isSearchRoute || authorizedPresentation?.isCurrent() === true;
+    if ((!isAuthorizedRoute(routeKey, authorizedRouteKey) && !searchPresentationContinues)
+        || !grantCurrent) {
         return <Loading />;
     }
 

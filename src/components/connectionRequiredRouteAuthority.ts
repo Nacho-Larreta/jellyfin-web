@@ -45,3 +45,56 @@ export function isAuthorizedRoute(
 ): boolean {
     return currentRouteKey === authorizedRouteKey;
 }
+
+export function isSearchQueryPresentationTransition(
+    authorizedRouteKey: string | null,
+    currentRouteKey: string
+): boolean {
+    if (!authorizedRouteKey) return false;
+
+    let authorized: unknown;
+    let current: unknown;
+    try {
+        authorized = JSON.parse(authorizedRouteKey);
+        current = JSON.parse(currentRouteKey);
+    } catch {
+        return false;
+    }
+
+    if (!isRouteIdentity(authorized) || !isRouteIdentity(current)) return false;
+    const [ authorizedLevel, , authorizedPath, authorizedSearch ] = authorized;
+    const [ currentLevel, , currentPath, currentSearch ] = current;
+    if (authorizedLevel !== 'user' || currentLevel !== 'user'
+        || authorizedPath !== '/search' || currentPath !== '/search'
+        || authorizedSearch === currentSearch) return false;
+
+    const previous = splitSearchQuery(authorizedSearch);
+    const next = splitSearchQuery(currentSearch);
+    return previous !== null && next !== null
+        && previous.otherParameters === next.otherParameters
+        && previous.query !== next.query;
+}
+
+function isRouteIdentity(value: unknown): value is [string, string, string, string] {
+    return Array.isArray(value) && value.length === 4
+        && value.every(part => typeof part === 'string');
+}
+
+function splitSearchQuery(search: string): { query: string | null; otherParameters: string } | null {
+    if (search && !search.startsWith('?')) return null;
+    const segments = search ? search.slice(1).split('&') : [];
+    const others: string[] = [];
+    let query: string | null = null;
+    for (const segment of segments) {
+        const separator = segment.indexOf('=');
+        const rawName = separator < 0 ? segment : segment.slice(0, separator);
+        if (new URLSearchParams(`${rawName}=`).has('query')) {
+            if (query !== null) return null;
+            query = segment;
+        } else {
+            others.push(segment);
+        }
+    }
+
+    return { query, otherParameters: others.join('&') };
+}
