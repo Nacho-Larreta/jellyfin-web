@@ -227,8 +227,7 @@ async function showPublicBranding(current) {
     }
 }
 
-pageClassOn('pageshow', 'page', function () {
-    const page = this;
+function activatePage(page) {
     if (!currentPage(page)) return;
     retire(activation);
     if (page.classList.contains('selfBackdropPage')) return;
@@ -250,4 +249,23 @@ pageClassOn('pageshow', 'page', function () {
         const parentId = page.classList.contains('globalBackdropPage') ? '' : libraryMenu.getTopParentId();
         void showPrivate(current, type, parentId);
     }
+}
+
+pageClassOn('pageshow', 'page', function () {
+    activatePage(this);
 });
+
+function findInitialPage() {
+    const mountedReactPages = Array.from(document.querySelectorAll(
+        '.skinBody:not(.mainAnimatedPages) .page.mainAnimatedPage[data-role="page"]'
+    )).filter(page => page.isConnected && !page.classList.contains('hide'));
+    if (mountedReactPages.length > 1) return null;
+    if (mountedReactPages.length === 1) return mountedReactPages[0];
+    return viewManager.currentView();
+}
+
+const initialPage = findInitialPage();
+if (initialPage?.isConnected && !initialPage.classList.contains('hide')) {
+    shownPage = initialPage;
+    activatePage(initialPage);
+}

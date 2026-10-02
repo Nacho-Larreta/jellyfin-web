@@ -52,6 +52,36 @@ afterEach(() => {
 });
 
 describe('shared backdrop owner', () => {
+    it('disposes a visible owner after its React containers unmount without recreating them', () => {
+        const onInvalidate = vi.fn();
+        const owner = acquireBackdropOwner(() => true, onInvalidate);
+        owner.setImages(['blob:old'], ['blob:old']);
+        loads[0].load();
+        const detachedBackdrop = document.querySelector('.backdropContainer');
+        const revoked = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {
+            expect(detachedBackdrop.querySelector('.backdropImage')).toBeNull();
+        });
+        const queued = loads[0].onload;
+        document.body.replaceChildren();
+
+        try {
+            expect(() => owner.dispose()).not.toThrow();
+            owner.dispose();
+            queued();
+            expect(document.querySelector('.backdropContainer')).toBeNull();
+            expect(document.querySelector('.backgroundContainer')).toBeNull();
+            expect(revoked).toHaveBeenCalledExactlyOnceWith('blob:old');
+            expect(onInvalidate).toHaveBeenCalledOnce();
+        } finally {
+            document.body.innerHTML = '<div class="backdropContainer"></div><div class="backgroundContainer"></div>';
+        }
+
+        setBackdrop('successor');
+        loads[1].load();
+        expect(visibleUrls()).toEqual(['successor']);
+        expect(document.querySelector('.backgroundContainer').classList.contains('withBackdrop')).toBe(true);
+    });
+
     it('removes old pixels before successor and ignores queued old Image callbacks', () => {
         const revoked = vi.spyOn(URL, 'revokeObjectURL');
         const old = acquireBackdropOwner(() => true);

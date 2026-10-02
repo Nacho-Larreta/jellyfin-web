@@ -38,10 +38,13 @@ function getBackgroundContainer() {
 }
 
 function setBackgroundContainerBackgroundEnabled() {
+    const container = getBackgroundContainer();
+    if (!container) return;
+
     if (hasInternalBackdrop || hasExternalBackdrop) {
-        getBackgroundContainer().classList.add('withBackdrop');
+        container.classList.add('withBackdrop');
     } else {
-        getBackgroundContainer().classList.remove('withBackdrop');
+        container.classList.remove('withBackdrop');
     }
 }
 
