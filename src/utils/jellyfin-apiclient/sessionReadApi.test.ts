@@ -323,7 +323,7 @@ describe('session scoped Search SDK transport', () => {
             envelope: {
                 ...envelope,
                 marker: {
-                    kind: 'PendingSwitch', phase: 'Preparing', switchId: 'switch-1',
+                    kind: 'PendingSwitch', phase: 'Preparing', playbackReport: null, switchId: 'switch-1',
                     serverId, deviceId, oldProfileUserId: userId, oldEpoch: 1,
                     targetProfileUserId: 'next-user', coordinatorId: 'coordinator-1',
                     fencingToken: 1, leaseExpiresAtMs: 1000, updatedAtMs: 0

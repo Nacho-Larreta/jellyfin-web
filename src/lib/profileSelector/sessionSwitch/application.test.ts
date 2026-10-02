@@ -226,7 +226,7 @@ describe('verified route presentation readiness', () => {
             ...stored,
             revision: stored.revision + 1,
             marker: {
-                kind: 'PendingSwitch', phase: 'Preparing', switchId: 'switch-1',
+                kind: 'PendingSwitch', phase: 'Preparing', playbackReport: null, switchId: 'switch-1',
                 serverId: 'server-1', deviceId: 'device-1', oldProfileUserId: 'secondary-user',
                 oldEpoch: 3, targetProfileUserId: 'other-user', coordinatorId: 'coordinator-1',
                 fencingToken: 1, leaseExpiresAtMs: 1000, updatedAtMs: 0
@@ -311,7 +311,7 @@ describe('WebSessionSwitchApplication bound reads', () => {
             ...stored,
             revision: 1,
             marker: {
-                kind: 'PendingSwitch', phase: 'Preparing', switchId: 'switch-1',
+                kind: 'PendingSwitch', phase: 'Preparing', playbackReport: null, switchId: 'switch-1',
                 serverId: 'server-1', deviceId: 'device-1', oldProfileUserId: 'owner-user',
                 oldEpoch: 1, targetProfileUserId: 'other-user', coordinatorId: 'coordinator-1',
                 fencingToken: 1, leaseExpiresAtMs: 1000, updatedAtMs: 0
@@ -486,6 +486,7 @@ describe('WebSessionSwitchApplication bootstrap', () => {
             marker: {
                 kind: 'PendingSwitch',
                 phase: 'Preparing',
+                playbackReport: null,
                 switchId: 'switch-winner',
                 serverId: 'server-1',
                 deviceId: 'device-1',
@@ -550,6 +551,7 @@ describe('WebSessionSwitchApplication bootstrap', () => {
             marker: {
                 kind: 'PendingSwitch',
                 phase: 'Preparing',
+                playbackReport: null,
                 switchId: 'switch-1',
                 serverId: 'server-1',
                 deviceId: 'device-1',
@@ -600,6 +602,7 @@ describe('WebSessionSwitchApplication bootstrap', () => {
             marker: {
                 kind: 'PendingSwitch',
                 phase: 'Preparing',
+                playbackReport: null,
                 switchId: 'raced-switch',
                 serverId: 'server-1',
                 deviceId: 'device-1',
@@ -696,6 +699,7 @@ describe('WebSessionSwitchApplication bootstrap', () => {
             marker: {
                 kind: 'PendingSwitch',
                 phase: 'CommitUnknown',
+                playbackReport: null,
                 switchId: 'switch-1',
                 serverId: 'server-1',
                 deviceId: 'device-1',

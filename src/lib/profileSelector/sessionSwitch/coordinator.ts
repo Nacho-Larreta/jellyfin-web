@@ -11,10 +11,12 @@ import {
     SessionStorageCorruptionError,
     SwitchAlreadyInProgressError,
     createActiveProfileSession,
+    settledSwitchMarker,
     type ActiveProfileSession,
     type CleanupPhase,
     type CommittedPendingCleanup,
     type PendingSwitchRecord,
+    type PendingPlaybackStop,
     type PlaybackQuiesceResult,
     type QuarantinedSession,
     type ServerSwitchResult,
@@ -41,8 +43,19 @@ export interface SessionSwitchTimeoutPolicy {
     readonly leaseMs: number;
 }
 
+export type PlaybackCaptureDecision =
+    | { readonly outcome: 'NotActive' | 'Failed' }
+    | { readonly outcome: 'Captured'; readonly report: PendingPlaybackStop };
+
+export interface PreparedReportDeadline {
+    readonly wallMs: number;
+    readonly monotonicMs: number;
+}
+
 export interface PlaybackQuiescePort {
-    stopAndReport(snapshot: ActiveProfileSession, switchId: string): Promise<PlaybackQuiesceResult>;
+    capture(snapshot: ActiveProfileSession, switchId: string): Promise<PlaybackCaptureDecision>;
+    stopAndReport(snapshot: ActiveProfileSession, switchId: string, report: PendingPlaybackStop, deadline: PreparedReportDeadline): Promise<PlaybackQuiesceResult>;
+    releaseCapture(switchId: string): void;
 }
 
 export interface SessionRuntimePort {
@@ -70,6 +83,10 @@ interface InFlightSwitch {
     readonly requestIdentity: string;
     readonly promise: Promise<ActiveProfileSession>;
 }
+
+type QuiesceOutcome =
+    | { readonly kind: 'Ready'; readonly envelope: SessionSwitchEnvelope }
+    | { readonly kind: 'Terminal'; readonly session: ActiveProfileSession };
 
 const DEFAULT_TIMEOUTS: SessionSwitchTimeoutPolicy = Object.freeze({
     prepareMs: 15_000,
@@ -182,6 +199,7 @@ export class ProfileSessionSwitchCoordinator {
                 marker: {
                     kind: 'PendingSwitch',
                     phase: 'Preparing',
+                    playbackReport: null,
                     switchId: request.switchId,
                     serverId: this.scope.serverId,
                     deviceId: this.scope.deviceId,
@@ -227,25 +245,47 @@ export class ProfileSessionSwitchCoordinator {
         }
 
         durable = await this.movePending(durable, 'Quiescing');
+        const quiesced = await this.quiescePreparedSwitch(durable, request.switchId);
+        if (quiesced.kind === 'Terminal') return quiesced.session;
+
+        durable = await this.movePending(quiesced.envelope, 'Committing');
+        return this.commit(durable);
+    }
+
+    private async quiescePreparedSwitch(
+        envelope: SessionSwitchEnvelope,
+        switchId: string
+    ): Promise<QuiesceOutcome> {
+        let durable = envelope;
         try {
-            const playbackResult = await this.playback.stopAndReport(
-                durable.activeSession,
-                request.switchId
-            );
-            if (playbackResult.outcome === 'Failed') {
+            const capture = await this.playback.capture(durable.activeSession, switchId);
+            if (capture.outcome === 'Failed') {
                 throw new PlaybackQuiesceFailedError();
+            }
+            if (capture.outcome === 'Captured') {
+                durable = await this.persistPlaybackReport(durable, capture.report);
+                const status = await this.timed('Status', this.api.status(switchId));
+                assertServerResult(status, durable.marker);
+                if (status.state === 'Committed') {
+                    return { kind: 'Terminal', session: await this.installCommitted(durable, status) };
+                }
+                if (status.state !== 'Prepared' || !this.hasReportWindow(status)) {
+                    return { kind: 'Terminal', session: await this.restoreOld(durable, status.state === 'Prepared') };
+                }
+                durable = await this.settlePlaybackReport(durable, this.reportDeadline(status));
             }
             await this.barrier.drainMutations();
         } catch (error) {
+            if (requirePendingMarker(durable).playbackReport?.status === 'Captured') {
+                throw new SessionSwitchRecoveryRequiredError(switchId);
+            }
             const restored = await this.restoreOld(durable, true);
             if (restored.profileUserId !== durable.activeSession.profileUserId) {
-                return restored;
+                return { kind: 'Terminal', session: restored };
             }
             throw error;
         }
-
-        durable = await this.movePending(durable, 'Committing');
-        return this.commit(durable);
+        return { kind: 'Ready', envelope: durable };
     }
 
     private async resumeOrJoin(envelope: SessionSwitchEnvelope): Promise<ActiveProfileSession> {
@@ -305,11 +345,83 @@ export class ProfileSessionSwitchCoordinator {
             return this.resumeQuarantine(envelope);
         }
 
+        if (ownedMarker.phase === 'Quiescing' && ownedMarker.playbackReport !== null) {
+            return this.reconcilePlaybackReport(envelope);
+        }
         if (ownedMarker.phase === 'Preparing' || ownedMarker.phase === 'Quiescing') {
             return this.restoreOld(envelope, true);
         }
 
         return this.resolveCommit(envelope);
+    }
+
+    private async reconcilePlaybackReport(envelope: SessionSwitchEnvelope): Promise<ActiveProfileSession> {
+        const marker = requirePendingMarker(envelope);
+        let status: ServerSwitchResult;
+        try {
+            status = await this.timed('Status', this.api.status(marker.switchId));
+        } catch {
+            throw new SessionSwitchRecoveryRequiredError(marker.switchId);
+        }
+        assertServerResult(status, marker);
+        if (status.state === 'Committed') return this.installCommitted(envelope, status);
+        if (status.state !== 'Prepared') return this.restoreOld(envelope, false);
+
+        if (marker.playbackReport?.status === 'Captured') {
+            if (!this.hasReportWindow(status)) return this.restoreOld(envelope, true);
+            envelope = await this.settlePlaybackReport(envelope, this.reportDeadline(status));
+        }
+        return this.restoreOld(envelope, true);
+    }
+
+    private hasReportWindow(status: ServerSwitchResult): status is ServerSwitchResult & {
+        preparedExpiresAtMs: number;
+        preparedExpiresAtMonotonicMs: number;
+    } {
+        return status.state === 'Prepared' && typeof status.preparedExpiresAtMs === 'number'
+            && Number.isSafeInteger(status.preparedExpiresAtMs)
+            && typeof status.preparedExpiresAtMonotonicMs === 'number'
+            && Number.isFinite(status.preparedExpiresAtMonotonicMs)
+            && this.clock.now() < status.preparedExpiresAtMs
+            && performance.now() < status.preparedExpiresAtMonotonicMs;
+    }
+
+    private reportDeadline(status: ServerSwitchResult): PreparedReportDeadline {
+        if (!this.hasReportWindow(status)) throw new SessionSwitchRecoveryRequiredError(status.switchId);
+        return { wallMs: status.preparedExpiresAtMs, monotonicMs: status.preparedExpiresAtMonotonicMs };
+    }
+
+    private async settlePlaybackReport(envelope: SessionSwitchEnvelope, deadline: PreparedReportDeadline): Promise<SessionSwitchEnvelope> {
+        const marker = requirePendingMarker(envelope);
+        const report = marker.playbackReport;
+        if (report === null || report.status !== 'Captured') {
+            throw new SessionSwitchRecoveryRequiredError(marker.switchId);
+        }
+        const result = await this.playback.stopAndReport(envelope.activeSession, marker.switchId, report, deadline);
+        if (result.outcome === 'Failed'
+            || (result.outcome === 'Acknowledged' && result.reportKey !== report.reportKey)) {
+            throw new PlaybackQuiesceFailedError();
+        }
+        const settled = await this.persistPlaybackReport(envelope, {
+            ...report,
+            status: result.outcome
+        });
+        this.playback.releaseCapture(marker.switchId);
+        return settled;
+    }
+
+    private persistPlaybackReport(
+        envelope: SessionSwitchEnvelope,
+        report: PendingPlaybackStop
+    ): Promise<SessionSwitchEnvelope> {
+        const marker = requirePendingMarker(envelope);
+        if (marker.phase !== 'Quiescing') throw new SessionSwitchRecoveryRequiredError(marker.switchId);
+        return this.replace(envelope, { ...envelope, marker: {
+            ...marker,
+            playbackReport: report,
+            leaseExpiresAtMs: this.leaseExpiry(),
+            updatedAtMs: this.clock.now()
+        } });
     }
 
     private async claimExpiredLease(envelope: SessionSwitchEnvelope): Promise<SessionSwitchEnvelope> {
@@ -412,11 +524,12 @@ export class ProfileSessionSwitchCoordinator {
             result.authentication.accessToken,
             nextEpoch
         );
+        const committedMarker = settledSwitchMarker(marker);
         const committedEnvelope = await this.replace(envelope, {
             ...envelope,
             activeSession,
             marker: {
-                ...marker,
+                ...committedMarker,
                 kind: 'CommittedPendingCleanup',
                 phase: 'Installing',
                 leaseExpiresAtMs: this.leaseExpiry(),
@@ -546,6 +659,7 @@ export class ProfileSessionSwitchCoordinator {
         }
 
         const restored = await this.replace(envelope, { ...envelope, marker: null });
+        this.playback.releaseCapture(marker.switchId);
         this.barrier.reopen(marker.switchId);
         return restored.activeSession;
     }
@@ -650,6 +764,10 @@ export class ProfileSessionSwitchCoordinator {
         try {
             envelope = await this.store.load(this.scope);
         } catch (error) {
+            if (error instanceof SessionSwitchRecoveryRequiredError) {
+                this.barrier.close(error.switchId);
+                throw error;
+            }
             this.barrier.synchronize(CORRUPT_SESSION_STORAGE);
             throw error;
         }

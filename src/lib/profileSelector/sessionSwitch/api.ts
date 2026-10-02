@@ -10,6 +10,7 @@ import {
 
 interface AjaxResponse {
     json(): Promise<unknown>;
+    headers?: { get(name: string): string | null };
 }
 
 interface ProfileSwitchApiClient {
@@ -84,6 +85,8 @@ export class LegacyProfileSwitchApi implements ProfileSwitchApiPort {
         }
 
         let response: AjaxResponse;
+        const requestStartedAtMs = Date.now();
+        const requestStartedAtMonotonicMs = performance.now();
         try {
             response = await this.apiClient.ajax(request);
         } catch (error) {
@@ -95,11 +98,19 @@ export class LegacyProfileSwitchApi implements ProfileSwitchApiPort {
             throw error;
         }
 
-        return parseServerResult(await response.json());
+        return parseServerResult(
+            await response.json(), response.headers?.get('Date') ?? null,
+            requestStartedAtMs, requestStartedAtMonotonicMs
+        );
     }
 }
 
-function parseServerResult(value: unknown): ServerSwitchResult {
+function parseServerResult(
+    value: unknown,
+    serverDate: string | null,
+    requestStartedAtMs: number,
+    requestStartedAtMonotonicMs: number
+): ServerSwitchResult {
     if (!isRecord(value)) {
         throw new TypeError('Invalid profile switch response.');
     }
@@ -107,6 +118,8 @@ function parseServerResult(value: unknown): ServerSwitchResult {
     const switchId = readRequiredString(value.SwitchId, 'SwitchId');
     const targetProfileUserId = readRequiredString(value.TargetProfileUserId, 'TargetProfileUserId');
     const state = readState(value.State);
+    const reportWindow = state === 'Prepared' ?
+        readPreparedReportWindow(value.PreparedExpiresUtc, serverDate, requestStartedAtMs, requestStartedAtMonotonicMs) : null;
     const authentication = state === 'Committed' ?
         readAuthentication(value.AuthenticationResult) :
         null;
@@ -115,8 +128,33 @@ function parseServerResult(value: unknown): ServerSwitchResult {
         switchId,
         targetProfileUserId,
         state,
+        preparedExpiresAtMs: reportWindow?.wallMs ?? null,
+        preparedExpiresAtMonotonicMs: reportWindow?.monotonicMs ?? null,
         authentication
     });
+}
+
+function readPreparedReportWindow(
+    value: unknown,
+    serverDate: string | null,
+    requestStartedAtMs: number,
+    requestStartedAtMonotonicMs: number
+): { wallMs: number; monotonicMs: number } | null {
+    if (typeof value !== 'string' || !/Z$/i.test(value)) {
+        throw new TypeError('Prepared profile switch response has no UTC expiry.');
+    }
+    const expiry = Date.parse(value);
+    if (!Number.isSafeInteger(expiry)) {
+        throw new TypeError('Prepared profile switch response has an invalid expiry.');
+    }
+    if (serverDate === null) return null;
+    const serverNow = Date.parse(serverDate);
+    if (!Number.isSafeInteger(serverNow)) return null;
+    const safeRemainingMs = expiry - serverNow - 1_000;
+    const wallMs = requestStartedAtMs + safeRemainingMs;
+    const monotonicMs = requestStartedAtMonotonicMs + safeRemainingMs;
+    return Number.isSafeInteger(wallMs) && Number.isFinite(monotonicMs) ?
+        { wallMs, monotonicMs } : null;
 }
 
 function readAuthentication(value: unknown): ServerSwitchAuthentication {

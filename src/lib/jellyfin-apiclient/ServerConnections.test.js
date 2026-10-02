@@ -69,7 +69,8 @@ import {
     SessionStorageCorruptionError,
     SessionSwitchUnsupportedEngineError,
     createActiveProfileSession,
-    createOwnerRecoverySession
+    createOwnerRecoverySession,
+    settledSwitchMarker
 } from '../profileSelector/sessionSwitch/model';
 import { SessionAdmissionBarrier } from '../profileSelector/sessionSwitch/barrier';
 import { getWebSessionSwitchApplication } from '../profileSelector/sessionSwitch/application';
@@ -106,6 +107,7 @@ function createPendingEnvelope(revision = 1) {
         marker: {
             kind: 'PendingSwitch',
             phase: 'Preparing',
+            playbackReport: null,
             switchId: 'switch-1',
             serverId: 'server-1',
             deviceId: 'device-1',
@@ -476,6 +478,34 @@ describe('ServerConnections session envelope adapter', () => {
         }));
         expect(observed).toHaveBeenCalledOnce();
         expect(observed).toHaveBeenCalledWith(envelope);
+    });
+
+    it('migrates a resolved v1 envelope in real credential storage before accepting a v2 writer', async () => {
+        const legacy = { ...createSessionSwitchEnvelope(
+            createActiveProfileSession('server-1', 'device-1', 'old-user', 'old-token', 7)
+        ), version: 1 };
+        const provider = createProvider({ SessionSwitchEnvelope: legacy });
+        const connections = createConnections(provider);
+        const store = new ServerConnectionsSessionSwitchStore(connections);
+
+        const migrated = await store.load({ serverId: 'server-1', deviceId: 'device-1' });
+
+        expect(migrated).toMatchObject({ version: 2, revision: 1, marker: null });
+        expect(provider.state().Servers[0].SessionSwitchEnvelope).toEqual(migrated);
+    });
+
+    it('rejects an old v1 writer after v2 became durable without altering credentials', async () => {
+        const provider = createProvider();
+        const connections = createConnections(provider);
+        const current = createPendingEnvelope();
+        await connections.replaceSessionSwitchEnvelope('server-1', 0, current);
+        const before = provider.state();
+
+        await expect(connections.replaceSessionSwitchEnvelope('server-1', 1, {
+            ...current, version: 1, revision: 2
+        })).rejects.toThrow('version');
+
+        expect(provider.state()).toEqual(before);
     });
 
     it('rolls back the complete previous snapshot and never publishes after a persistence failpoint', async () => {
@@ -1303,11 +1333,12 @@ describe('ServerConnections session envelope adapter', () => {
         const targetSession = createActiveProfileSession(
             'server-1', 'device-1', 'target-user', 'target-token', 8
         );
+        const settledMarker = settledSwitchMarker(pending.marker);
         const committed = {
             ...pending,
             revision: 2,
             activeSession: targetSession,
-            marker: { ...pending.marker, kind: 'CommittedPendingCleanup', phase: 'Completing' }
+            marker: { ...settledMarker, kind: 'CommittedPendingCleanup', phase: 'Completing' }
         };
         await connections.replaceSessionSwitchEnvelope('server-1', 1, committed);
         connections.installSessionAuthentication(targetSession);

@@ -5,8 +5,8 @@ import { bytesToHex } from '@noble/hashes/utils';
 import { appHost } from 'components/apphost';
 import { playbackManager } from 'components/playback/playbackmanager';
 
-import { type PlaybackQuiescePort } from './coordinator';
-import { type ActiveProfileSession, type PlaybackQuiesceResult } from './model';
+import { type PlaybackQuiescePort, type PreparedReportDeadline } from './coordinator';
+import { assertSessionEnvelope, isJellyfinItemId, type ActiveProfileSession, type PendingPlaybackStop, type PlaybackQuiesceResult } from './model';
 
 interface Player {
     readonly isLocalPlayer: boolean;
@@ -32,10 +32,16 @@ interface PlaybackManagerPort {
 
 interface ApiClient {
     getUrl(path: string): string;
+    serverId(): string;
+    serverAddress(): string;
+    deviceId(): string;
+    getCurrentUserId(): string | null;
+    accessToken(): string | null;
 }
 
 interface PlaybackConnections {
     getApiClient(serverId: string): ApiClient | null;
+    getSessionSwitchEnvelope(serverId: string): unknown;
 }
 
 interface ClientIdentity {
@@ -55,9 +61,7 @@ interface PlaybackReport {
 interface CapturedPlayback {
     readonly session: ActiveProfileSession;
     readonly player: Player;
-    readonly url: string;
-    readonly authorization: string;
-    readonly report: PlaybackReport;
+    readonly report: PendingPlaybackStop;
     stopped: boolean;
 }
 
@@ -84,46 +88,128 @@ export class WebPlaybackQuiescePort implements PlaybackQuiescePort {
         private readonly transport: PlaybackTransport = postPlaybackStop
     ) {}
 
-    async stopAndReport(session: ActiveProfileSession, switchId: string): Promise<PlaybackQuiesceResult> {
+    async capture(session: ActiveProfileSession, switchId: string): Promise<
+        { readonly outcome: 'NotActive' | 'Failed' } |
+        { readonly outcome: 'Captured'; readonly report: PendingPlaybackStop }> {
         try {
             if (!UUID.test(switchId)) return { outcome: 'Failed' };
-
             const decision = this.getOrCapture(session, switchId);
-            if (decision.outcome === 'NotActive') return { outcome: 'NotActive' };
-            if (!decision.capture) return { outcome: 'Failed' };
-            const captured = decision.capture;
-
-            if (!captured.stopped) {
-                await within(
-                    this.manager.stopForProfileSwitch(
-                        captured.player,
-                        captured.report.ItemId,
-                        captured.report.PlaySessionId
-                    ),
-                    STOP_TIMEOUT_MS
-                );
-                if (!this.proveNoPlayback(this.manager.getCurrentPlayer())) {
-                    return { outcome: 'Failed' };
-                }
-                captured.stopped = true;
+            if (decision.outcome === 'Captured' && decision.capture) {
+                return { outcome: 'Captured', report: decision.capture.report };
             }
-
-            const result = await within(
-                this.transport(captured.url, captured.authorization, captured.report, REPORT_TIMEOUT_MS),
-                REPORT_TIMEOUT_MS
-            );
-            const expectedKey = await reportKey(switchId, captured.report.PlaySessionId);
-            if (!isRecord(result) || result.ReportKey !== expectedKey) return { outcome: 'Failed' };
-            if (!this.proveNoPlayback(this.manager.getCurrentPlayer())) return { outcome: 'Failed' };
-
-            if (result.Outcome === 'Acknowledged') {
-                return { outcome: 'Acknowledged', reportKey: expectedKey };
-            }
-            if (result.Outcome === 'NotActive') return { outcome: 'NotActive' };
-            return { outcome: 'Failed' };
+            return { outcome: decision.outcome === 'NotActive' ? 'NotActive' : 'Failed' };
         } catch {
             return { outcome: 'Failed' };
         }
+    }
+
+    async stopAndReport(
+        session: ActiveProfileSession,
+        switchId: string,
+        persisted: PendingPlaybackStop,
+        deadline: PreparedReportDeadline
+    ): Promise<PlaybackQuiesceResult> {
+        try {
+            if (!this.matchesVerifiedAuthority(session, switchId, persisted)
+                || !this.beforeExpiry(deadline)
+                || !await this.stopCapturedPlayer(session, switchId, persisted, deadline)
+                || !this.beforeExpiry(deadline)
+                || !this.matchesVerifiedAuthority(session, switchId, persisted)
+                || !this.matchesDurablePendingReport(session, switchId, persisted)) return { outcome: 'Failed' };
+            return await this.sendCapturedReport(session, persisted);
+        } catch {
+            return { outcome: 'Failed' };
+        }
+    }
+
+    releaseCapture(switchId: string): void {
+        this.captures.delete(switchId);
+    }
+
+    private beforeExpiry(deadline: PreparedReportDeadline): boolean {
+        return Number.isSafeInteger(deadline.wallMs) && Number.isFinite(deadline.monotonicMs)
+            && Date.now() < deadline.wallMs && performance.now() < deadline.monotonicMs;
+    }
+
+    private matchesVerifiedAuthority(
+        session: ActiveProfileSession,
+        switchId: string,
+        report: PendingPlaybackStop
+    ): boolean {
+        const client = this.connections.getApiClient(session.serverId);
+        return !!client && UUID.test(switchId)
+            && client.serverId() === session.serverId && client.deviceId() === session.deviceId
+            && client.getCurrentUserId() === session.profileUserId
+            && client.accessToken() === session.credentialRef.token
+            && client.serverAddress() === report.serverAddress
+            && client.getUrl(`ProfileSelectors/Current/Switches/${switchId}/PlaybackStopped`) === report.endpointUrl
+            && reportKey(switchId, report.playSessionId) === report.reportKey;
+    }
+
+    private matchesDurablePendingReport(
+        session: ActiveProfileSession,
+        switchId: string,
+        report: PendingPlaybackStop
+    ): boolean {
+        const envelope = this.connections.getSessionSwitchEnvelope(session.serverId);
+        assertSessionEnvelope(envelope);
+        const marker = envelope.marker;
+        return sameSession(envelope.activeSession, session)
+            && marker?.kind === 'PendingSwitch'
+            && marker.phase === 'Quiescing'
+            && marker.switchId === switchId
+            && marker.playbackReport?.status === 'Captured'
+            && sameReport(marker.playbackReport, report);
+    }
+
+    private async stopCapturedPlayer(
+        session: ActiveProfileSession,
+        switchId: string,
+        report: PendingPlaybackStop,
+        deadline: PreparedReportDeadline
+    ): Promise<boolean> {
+        const captured = this.captures.get(switchId);
+        if (captured && (!sameSession(captured.session, session)
+            || !sameReport(captured.report, report))) return false;
+        const player = captured?.player ?? this.manager.getCurrentPlayer();
+        const item = player ? this.manager.currentItem(player) : null;
+        if (player && item != null && (!isRecord(item) || item.Id !== report.itemId
+            || this.manager.playSessionId(player) !== report.playSessionId
+            || !player.isLocalPlayer || !this.otherPlayersInactive(player))) return false;
+        if (player && item != null && !captured?.stopped) {
+            if (!this.beforeExpiry(deadline)) return false;
+            await within(this.manager.stopForProfileSwitch(player, report.itemId, report.playSessionId), STOP_TIMEOUT_MS);
+            if (captured) captured.stopped = true;
+        }
+        return this.proveNoPlayback(this.manager.getCurrentPlayer());
+    }
+
+    private async sendCapturedReport(
+        session: ActiveProfileSession,
+        persisted: PendingPlaybackStop
+    ): Promise<PlaybackQuiesceResult> {
+        const authorization = getAuthorizationHeader(
+            { name: persisted.appName, version: persisted.appVersion },
+            { id: session.deviceId, name: persisted.deviceName },
+            session.credentialRef.token
+        );
+        const report: PlaybackReport = {
+            ItemId: persisted.itemId,
+            PlaySessionId: persisted.playSessionId,
+            PositionTicks: persisted.positionTicks,
+            Failed: false,
+            NextMediaType: null
+        };
+        const result = await within(
+            this.transport(persisted.endpointUrl, authorization, report, REPORT_TIMEOUT_MS),
+            REPORT_TIMEOUT_MS
+        );
+        if (!isRecord(result) || result.ReportKey !== persisted.reportKey
+            || !this.proveNoPlayback(this.manager.getCurrentPlayer())) return { outcome: 'Failed' };
+        if (result.Outcome === 'Acknowledged') {
+            return { outcome: 'Acknowledged', reportKey: persisted.reportKey };
+        }
+        return { outcome: result.Outcome === 'NotActive' ? 'NotActive' : 'Failed' };
     }
 
     private getOrCapture(session: ActiveProfileSession, switchId: string): CaptureDecision {
@@ -142,16 +228,16 @@ export class WebPlaybackQuiescePort implements PlaybackQuiescePort {
         }
         if (!player.isLocalPlayer || !this.otherPlayersInactive(player)) return { outcome: 'Failed' };
 
-        const captured = this.capture(session, switchId, player);
+        const captured = this.capturePlayback(session, switchId, player);
         if (captured) this.captures.set(switchId, captured);
         return captured ? { outcome: 'Captured', capture: captured } : { outcome: 'Failed' };
     }
 
-    private capture(session: ActiveProfileSession, switchId: string, player: Player): CapturedPlayback | null {
+    private capturePlayback(session: ActiveProfileSession, switchId: string, player: Player): CapturedPlayback | null {
         const item = this.manager.currentItem(player);
         const playSessionId = this.manager.playSessionId(player);
         const state = this.manager.getPlayerState(player);
-        if (!isRecord(item) || typeof item.Id !== 'string' || !UUID.test(item.Id)
+        if (!isRecord(item) || !isJellyfinItemId(item.Id)
             || item.ServerId !== session.serverId || typeof playSessionId !== 'string'
             || !playSessionId || playSessionId.length > 255 || !isRecord(state)
             || !isRecord(state.PlayState)) return null;
@@ -160,22 +246,24 @@ export class WebPlaybackQuiescePort implements PlaybackQuiescePort {
         if (typeof position !== 'number' || !Number.isSafeInteger(position) || position < 0) return null;
 
         const client = this.connections.getApiClient(session.serverId);
-        if (!client || !session.credentialRef.token) return null;
+        if (!client || client.serverId() !== session.serverId || client.deviceId() !== session.deviceId
+            || client.getCurrentUserId() !== session.profileUserId
+            || client.accessToken() !== session.credentialRef.token) return null;
 
-        const url = client.getUrl(`ProfileSelectors/Current/Switches/${switchId}/PlaybackStopped`);
-        const authorization = getAuthorizationHeader(
-            { name: this.identity.appName(), version: this.identity.appVersion() },
-            { id: session.deviceId, name: this.identity.deviceName() },
-            session.credentialRef.token
-        );
-        const report: PlaybackReport = Object.freeze({
-            ItemId: item.Id,
-            PlaySessionId: playSessionId,
-            PositionTicks: position,
-            Failed: false,
-            NextMediaType: null
+        const report: PendingPlaybackStop = Object.freeze({
+            version: 1,
+            status: 'Captured',
+            itemId: item.Id,
+            playSessionId,
+            positionTicks: position,
+            reportKey: reportKey(switchId, playSessionId),
+            endpointUrl: client.getUrl(`ProfileSelectors/Current/Switches/${switchId}/PlaybackStopped`),
+            serverAddress: client.serverAddress(),
+            appName: this.identity.appName(),
+            appVersion: this.identity.appVersion(),
+            deviceName: this.identity.deviceName()
         });
-        return { session, player, url, authorization, report, stopped: false };
+        return { session, player, report, stopped: false };
     }
 
     private proveNoPlayback(current: Player | null): boolean {
@@ -213,6 +301,14 @@ function sameSession(a: ActiveProfileSession, b: ActiveProfileSession): boolean 
     return a.serverId === b.serverId && a.deviceId === b.deviceId
         && a.profileUserId === b.profileUserId && a.sessionEpoch === b.sessionEpoch
         && a.credentialRef.token === b.credentialRef.token;
+}
+
+function sameReport(a: PendingPlaybackStop, b: PendingPlaybackStop): boolean {
+    return a.itemId === b.itemId && a.playSessionId === b.playSessionId
+        && a.positionTicks === b.positionTicks && a.reportKey === b.reportKey
+        && a.endpointUrl === b.endpointUrl && a.serverAddress === b.serverAddress
+        && a.appName === b.appName && a.appVersion === b.appVersion
+        && a.deviceName === b.deviceName;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

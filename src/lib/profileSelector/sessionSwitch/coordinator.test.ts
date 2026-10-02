@@ -11,9 +11,11 @@ import {
     SwitchAlreadyInProgressError,
     createActiveProfileSession,
     createOwnerRecoverySession,
+    settledSwitchMarker,
     type CleanupPhase,
     type CommittedPendingCleanup,
     type PendingSwitchRecord,
+    type PendingPlaybackStop,
     type ServerSwitchResult,
     type SessionEnvelopeObservation,
     type SessionSwitchEnvelope
@@ -41,6 +43,20 @@ const timeouts: SessionSwitchTimeoutPolicy = {
     abortMs: 40,
     joinMs: 50,
     leaseMs: 1_000
+};
+
+const capturedReport: PendingPlaybackStop = {
+    version: 1,
+    status: 'Captured',
+    itemId: 'bbbbbbbbbbbb4bbbbbbbbbbbbbbbbbbb',
+    playSessionId: 'play-old',
+    positionTicks: 250,
+    reportKey: 'a'.repeat(64),
+    endpointUrl: 'http://local.test/old-api/ProfileSelectors/Current/Switches/switch-1/PlaybackStopped',
+    serverAddress: 'http://local.test/old-api',
+    appName: 'Jellyfin Web',
+    appVersion: '1',
+    deviceName: 'Browser'
 };
 
 class MemoryStore implements AtomicSessionSwitchStore {
@@ -158,6 +174,8 @@ function serverResult(state: ServerSwitchResult['state']): ServerSwitchResult {
         switchId: 'switch-1',
         targetProfileUserId: 'target-user',
         state,
+        preparedExpiresAtMs: state === 'Prepared' ? 1_000_000 : null,
+        preparedExpiresAtMonotonicMs: state === 'Prepared' ? 1_000_000 : null,
         authentication: state === 'Committed' ?
             { accessToken: 'target-token', userId: 'target-user' } :
             null
@@ -199,10 +217,12 @@ function createHarness(
         })
     };
     const playback: PlaybackQuiescePort = {
-        stopAndReport: vi.fn(async () => {
+        capture: vi.fn(async () => {
             events.push('playback:quiesce');
-            return { outcome: 'Acknowledged' as const, reportKey: 'report-key' };
-        })
+            return { outcome: 'NotActive' as const };
+        }),
+        stopAndReport: vi.fn(async () => ({ outcome: 'Failed' as const })),
+        releaseCapture: vi.fn()
     };
     const runtime: SessionRuntimePort = {
         installActiveSession: vi.fn(async session => {
@@ -259,6 +279,168 @@ async function waitUntil(condition: () => boolean): Promise<void> {
 }
 
 describe('ProfileSessionSwitchCoordinator', () => {
+    it('writes the immutable report before stopping and settles it before commit', async () => {
+        const h = createHarness();
+        vi.mocked(h.playback.capture).mockResolvedValueOnce({ outcome: 'Captured', report: capturedReport });
+        vi.mocked(h.api.status).mockResolvedValueOnce(serverResult('Prepared'));
+        vi.mocked(h.playback.stopAndReport).mockImplementationOnce(async (_session, _id, report) => {
+            expect(h.store.envelope.marker).toMatchObject({
+                phase: 'Quiescing', playbackReport: report
+            });
+            return { outcome: 'Acknowledged', reportKey: report.reportKey };
+        });
+
+        await h.coordinator.switchProfile(switchRequest);
+
+        const pending = h.store.writes.filter(write => write.marker?.kind === 'PendingSwitch');
+        expect(pending.map(write => write.marker?.kind === 'PendingSwitch' ?
+            write.marker.playbackReport?.status ?? null : null))
+            .toEqual([ null, null, 'Captured', 'Acknowledged', 'Acknowledged' ]);
+        expect(h.playback.stopAndReport).toHaveBeenCalledWith(
+            h.store.writes[0].activeSession, switchRequest.switchId, capturedReport,
+            { wallMs: 1_000_000, monotonicMs: 1_000_000 }
+        );
+        expect(h.store.envelope.marker).toBeNull();
+        expect(h.playback.releaseCapture).toHaveBeenCalledWith(switchRequest.switchId);
+    });
+
+    it('does not stop when persisting the capture fails', async () => {
+        const h = createHarness();
+        vi.mocked(h.playback.capture).mockResolvedValueOnce({ outcome: 'Captured', report: capturedReport });
+        h.store.failNextReplace = envelope => envelope.marker?.kind === 'PendingSwitch'
+            && envelope.marker.playbackReport?.status === 'Captured';
+
+        await expect(h.coordinator.switchProfile(switchRequest)).rejects.toThrow('durable store failpoint');
+        expect(h.playback.stopAndReport).not.toHaveBeenCalled();
+    });
+
+    it('does not stop after a suspended status response crosses the server prepare deadline', async () => {
+        const h = createHarness();
+        vi.mocked(h.playback.capture).mockResolvedValueOnce({ outcome: 'Captured', report: capturedReport });
+        vi.mocked(h.api.status).mockImplementationOnce(async () => {
+            h.clock.advance(20);
+            return { ...serverResult('Prepared'), preparedExpiresAtMs: 110 };
+        });
+
+        await expect(h.coordinator.switchProfile(switchRequest)).resolves.toEqual(createInitialEnvelope().activeSession);
+
+        expect(h.api.status).toHaveBeenCalledOnce();
+        expect(h.playback.stopAndReport).not.toHaveBeenCalled();
+        expect(h.api.commit).not.toHaveBeenCalled();
+        expect(h.api.abort).toHaveBeenCalledOnce();
+        expect(h.playback.releaseCapture).toHaveBeenCalledWith(switchRequest.switchId);
+    });
+
+    it('recovers a captured report after death without recapturing an absent player', async () => {
+        const first = createHarness();
+        const stored = { ...first.store.envelope, revision: 2, marker: {
+            ...pendingMarker('Quiescing'), playbackReport: capturedReport
+        } } satisfies SessionSwitchEnvelope;
+        const restarted = createHarness(stored);
+        vi.mocked(restarted.api.status).mockResolvedValueOnce(serverResult('Prepared'));
+        vi.mocked(restarted.playback.stopAndReport).mockResolvedValueOnce({
+            outcome: 'Acknowledged', reportKey: capturedReport.reportKey
+        });
+
+        await expect(restarted.coordinator.recover()).resolves.toEqual(stored.activeSession);
+
+        expect(restarted.playback.capture).not.toHaveBeenCalled();
+        expect(restarted.playback.stopAndReport).toHaveBeenCalledWith(
+            stored.activeSession, switchRequest.switchId, capturedReport,
+            { wallMs: 1_000_000, monotonicMs: 1_000_000 }
+        );
+        expect(restarted.events.indexOf('api:status')).toBeLessThan(restarted.events.indexOf('api:abort'));
+        expect(restarted.api.commit).not.toHaveBeenCalled();
+        expect(restarted.store.envelope.marker).toBeNull();
+    });
+
+    it.each([ 'Expired', 'Aborted' ] as const)(
+        'does not replay a retained report after the server says %s', async state => {
+            const base = createInitialEnvelope();
+            const stored = { ...base, revision: 2, marker: {
+                ...pendingMarker('Quiescing'), playbackReport: capturedReport
+            } } satisfies SessionSwitchEnvelope;
+            const h = createHarness(stored);
+            vi.mocked(h.api.status).mockResolvedValueOnce(serverResult(state));
+
+            await expect(h.coordinator.recover()).resolves.toEqual(base.activeSession);
+            expect(h.playback.stopAndReport).not.toHaveBeenCalled();
+            expect(h.api.commit).not.toHaveBeenCalled();
+            expect(h.store.envelope.marker).toBeNull();
+        }
+    );
+
+    it('retains an unknown report result, then retries the exact capture after restart', async () => {
+        const first = createHarness();
+        vi.mocked(first.playback.capture).mockResolvedValueOnce({ outcome: 'Captured', report: capturedReport });
+        vi.mocked(first.api.status).mockResolvedValueOnce(serverResult('Prepared'));
+        await expect(first.coordinator.switchProfile(switchRequest))
+            .rejects.toBeInstanceOf(SessionSwitchRecoveryRequiredError);
+        expect(first.store.envelope.marker).toMatchObject({
+            phase: 'Quiescing', playbackReport: capturedReport
+        });
+
+        const restarted = createHarness(first.store.envelope);
+        vi.mocked(restarted.api.status).mockResolvedValueOnce(serverResult('Prepared'));
+        vi.mocked(restarted.playback.stopAndReport).mockResolvedValueOnce({
+            outcome: 'Acknowledged', reportKey: capturedReport.reportKey
+        });
+        await expect(restarted.coordinator.recover()).resolves.toEqual(first.store.envelope.activeSession);
+        expect(restarted.playback.stopAndReport).toHaveBeenCalledWith(
+            first.store.envelope.activeSession, switchRequest.switchId, capturedReport,
+            { wallMs: 1_000_000, monotonicMs: 1_000_000 }
+        );
+        expect(restarted.api.abort).toHaveBeenCalledOnce();
+        expect(restarted.api.commit).not.toHaveBeenCalled();
+    });
+
+    it('retries the exact report if its server response arrived but settlement persistence failed', async () => {
+        const first = createHarness();
+        vi.mocked(first.playback.capture).mockResolvedValueOnce({ outcome: 'Captured', report: capturedReport });
+        vi.mocked(first.api.status).mockResolvedValueOnce(serverResult('Prepared'));
+        vi.mocked(first.playback.stopAndReport).mockResolvedValueOnce({
+            outcome: 'Acknowledged', reportKey: capturedReport.reportKey
+        });
+        first.store.failNextReplace = envelope => envelope.marker?.kind === 'PendingSwitch'
+            && envelope.marker.playbackReport?.status === 'Acknowledged';
+
+        await expect(first.coordinator.switchProfile(switchRequest))
+            .rejects.toBeInstanceOf(SessionSwitchRecoveryRequiredError);
+        expect(first.playback.stopAndReport).toHaveBeenCalledOnce();
+        expect(first.store.envelope.marker).toMatchObject({
+            phase: 'Quiescing', playbackReport: capturedReport
+        });
+
+        const restarted = createHarness(first.store.envelope);
+        vi.mocked(restarted.api.status).mockResolvedValueOnce(serverResult('Prepared'));
+        vi.mocked(restarted.playback.stopAndReport).mockResolvedValueOnce({
+            outcome: 'Acknowledged', reportKey: capturedReport.reportKey
+        });
+        await expect(restarted.coordinator.recover()).resolves.toEqual(first.store.envelope.activeSession);
+        expect(restarted.playback.capture).not.toHaveBeenCalled();
+        expect(restarted.playback.stopAndReport).toHaveBeenCalledWith(
+            first.store.envelope.activeSession, switchRequest.switchId, capturedReport,
+            { wallMs: 1_000_000, monotonicMs: 1_000_000 }
+        );
+        expect(restarted.api.abort).toHaveBeenCalledOnce();
+        expect(restarted.api.commit).not.toHaveBeenCalled();
+    });
+
+    it('uses a durably settled report after restart without sending another stop', async () => {
+        const initial = createInitialEnvelope();
+        const settled = { ...capturedReport, status: 'Acknowledged' as const };
+        const envelope = { ...initial, revision: 3, marker: {
+            ...pendingMarker('Quiescing'), playbackReport: settled
+        } } satisfies SessionSwitchEnvelope;
+        const restarted = createHarness(envelope);
+        vi.mocked(restarted.api.status).mockResolvedValueOnce(serverResult('Prepared'));
+
+        await expect(restarted.coordinator.recover()).resolves.toEqual(initial.activeSession);
+
+        expect(restarted.playback.stopAndReport).not.toHaveBeenCalled();
+        expect(restarted.api.abort).toHaveBeenCalledOnce();
+        expect(restarted.api.commit).not.toHaveBeenCalled();
+    });
     it('persists every phase before its side effect and installs exactly oldEpoch + 1', async () => {
         const harness = createHarness();
 
@@ -587,6 +769,7 @@ function pendingMarker(phase: PendingSwitchRecord['phase']): PendingSwitchRecord
     return {
         kind: 'PendingSwitch',
         phase,
+        playbackReport: null,
         switchId: 'switch-1',
         serverId: 'server-1',
         deviceId: 'device-1',
@@ -602,8 +785,9 @@ function pendingMarker(phase: PendingSwitchRecord['phase']): PendingSwitchRecord
 
 function committedEnvelope(phase: CleanupPhase): SessionSwitchEnvelope {
     const active = createActiveProfileSession('server-1', 'device-1', 'target-user', 'target-token', 8);
+    const priorMarker = settledSwitchMarker(pendingMarker('Committing'));
     const marker: CommittedPendingCleanup = {
-        ...pendingMarker('Committing'),
+        ...priorMarker,
         kind: 'CommittedPendingCleanup',
         phase
     };

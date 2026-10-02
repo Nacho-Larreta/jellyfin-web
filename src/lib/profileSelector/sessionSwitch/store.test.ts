@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { createActiveProfileSession, createOwnerRecoverySession } from './model';
+import {
+    ConcurrentSessionWriteError,
+    SessionSwitchRecoveryRequiredError,
+    createActiveProfileSession,
+    createOwnerRecoverySession
+} from './model';
 import {
     ServerConnectionsSessionSwitchStore,
     createSessionSwitchEnvelope
@@ -26,6 +31,62 @@ function createPersistence(stored: unknown = null) {
 }
 
 describe('ServerConnectionsSessionSwitchStore', () => {
+    it('migrates a resolved v1 envelope through CAS before returning it', async () => {
+        const old = { ...createSessionSwitchEnvelope(
+            createActiveProfileSession('server-1', 'device-1', 'profile-1', 'active-token', 2)
+        ), version: 1 };
+        const persistence = createPersistence(old);
+        const migrated = await new ServerConnectionsSessionSwitchStore(persistence).load(scope);
+
+        expect(migrated).toMatchObject({ version: 2, revision: 1, marker: null });
+        expect(persistence.replaceSessionSwitchEnvelope).toHaveBeenCalledWith('server-1', 0, migrated);
+    });
+
+    it('fails closed for a legacy pending switch that might have stopped playback', async () => {
+        const old = { ...createSessionSwitchEnvelope(
+            createActiveProfileSession('server-1', 'device-1', 'profile-1', 'active-token', 2)
+        ), version: 1, marker: {
+            kind: 'PendingSwitch', phase: 'Quiescing', switchId: 'switch-1', serverId: 'server-1',
+            deviceId: 'device-1', oldProfileUserId: 'profile-1', oldEpoch: 2,
+            targetProfileUserId: 'profile-2', coordinatorId: 'old-coordinator',
+            fencingToken: 1, leaseExpiresAtMs: 10, updatedAtMs: 0
+        } };
+        const persistence = createPersistence(old);
+
+        await expect(new ServerConnectionsSessionSwitchStore(persistence).load(scope))
+            .rejects.toBeInstanceOf(SessionSwitchRecoveryRequiredError);
+        expect(persistence.replaceSessionSwitchEnvelope).not.toHaveBeenCalled();
+    });
+
+    it('migrates a legacy Preparing marker with no possible playback stop for safe abort recovery', async () => {
+        const old = { ...createSessionSwitchEnvelope(
+            createActiveProfileSession('server-1', 'device-1', 'profile-1', 'active-token', 2)
+        ), version: 1, marker: {
+            kind: 'PendingSwitch', phase: 'Preparing', switchId: 'switch-1', serverId: 'server-1',
+            deviceId: 'device-1', oldProfileUserId: 'profile-1', oldEpoch: 2,
+            targetProfileUserId: 'profile-2', coordinatorId: 'old-coordinator',
+            fencingToken: 1, leaseExpiresAtMs: 10, updatedAtMs: 0
+        } };
+        const persistence = createPersistence(old);
+
+        await expect(new ServerConnectionsSessionSwitchStore(persistence).load(scope))
+            .resolves.toMatchObject({ version: 2, revision: 1,
+                marker: { phase: 'Preparing', playbackReport: null } });
+    });
+
+    it('reloads the winning v2 envelope when another tab wins migration', async () => {
+        const initial = createSessionSwitchEnvelope(
+            createActiveProfileSession('server-1', 'device-1', 'profile-1', 'active-token', 2)
+        );
+        const persistence = createPersistence({ ...initial, version: 1 });
+        persistence.replaceSessionSwitchEnvelope.mockImplementationOnce(async () => {
+            persistence.getSessionSwitchEnvelope.mockReturnValue({ ...initial, revision: 1 });
+            throw new ConcurrentSessionWriteError(1);
+        });
+
+        await expect(new ServerConnectionsSessionSwitchStore(persistence).load(scope))
+            .resolves.toMatchObject({ version: 2, revision: 1 });
+    });
     it('replaces the complete envelope with the expected CAS revision in one persistence call', async () => {
         const active = createActiveProfileSession('server-1', 'device-1', 'profile-1', 'active-token', 2);
         const recovery = createOwnerRecoverySession('server-1', 'device-1', 'owner-1', 'recovery-token');
@@ -91,11 +152,11 @@ describe('ServerConnectionsSessionSwitchStore', () => {
             pin: '0012'
         };
 
-        expect(() => new ServerConnectionsSessionSwitchStore(createPersistence(malformed)).load(scope))
-            .toThrow('schema');
+        await expect(new ServerConnectionsSessionSwitchStore(createPersistence(malformed)).load(scope))
+            .rejects.toThrow('schema');
     });
 
-    it('rejects a completion receipt that is not bound to the active server, profile and epoch', () => {
+    it('rejects a completion receipt that is not bound to the active server, profile and epoch', async () => {
         const active = createActiveProfileSession('server-1', 'device-1', 'profile-1', 'active-token', 2);
         const malformed = {
             ...createSessionSwitchEnvelope(active),
@@ -107,7 +168,29 @@ describe('ServerConnectionsSessionSwitchStore', () => {
             }
         };
 
-        expect(() => new ServerConnectionsSessionSwitchStore(createPersistence(malformed)).load(scope))
-            .toThrow('terminal session');
+        await expect(new ServerConnectionsSessionSwitchStore(createPersistence(malformed)).load(scope))
+            .rejects.toThrow('terminal session');
+    });
+
+    it('rejects a v2 captured report with prohibited or corrupt fields', async () => {
+        const initial = createSessionSwitchEnvelope(
+            createActiveProfileSession('server-1', 'device-1', 'profile-1', 'active-token', 2)
+        );
+        const marker = {
+            kind: 'PendingSwitch', phase: 'Quiescing', switchId: 'switch-1', serverId: 'server-1',
+            deviceId: 'device-1', oldProfileUserId: 'profile-1', oldEpoch: 2,
+            targetProfileUserId: 'profile-2', coordinatorId: 'coordinator-1',
+            fencingToken: 1, leaseExpiresAtMs: 10, updatedAtMs: 0,
+            playbackReport: {
+                version: 1, status: 'Captured', itemId: 'bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',
+                playSessionId: 'play-old', positionTicks: 250, reportKey: 'a'.repeat(64),
+                endpointUrl: 'http://local.test/old-api/report', serverAddress: 'http://local.test/old-api',
+                appName: 'Jellyfin Web', appVersion: '1', deviceName: 'Browser', token: 'prohibited'
+            }
+        };
+        const persistence = createPersistence({ ...initial, marker });
+
+        await expect(new ServerConnectionsSessionSwitchStore(persistence).load(scope))
+            .rejects.toThrow('schema');
     });
 });

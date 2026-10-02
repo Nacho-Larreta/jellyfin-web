@@ -118,13 +118,22 @@ const defaultClock: SessionSwitchClock = {
 
 function createDeferredPlaybackPort(connections: SessionSwitchConnections): PlaybackQuiescePort {
     let port: PlaybackQuiescePort | null = null;
+    const getPort = async (): Promise<PlaybackQuiescePort> => {
+        if (port === null) {
+            const { createWebPlaybackQuiescePort } = await import('./playback');
+            port = createWebPlaybackQuiescePort(connections);
+        }
+        return port;
+    };
     return {
-        async stopAndReport(session, switchId) {
-            if (port === null) {
-                const { createWebPlaybackQuiescePort } = await import('./playback');
-                port = createWebPlaybackQuiescePort(connections);
-            }
-            return port.stopAndReport(session, switchId);
+        async capture(session, switchId) {
+            return (await getPort()).capture(session, switchId);
+        },
+        async stopAndReport(session, switchId, report, deadline) {
+            return (await getPort()).stopAndReport(session, switchId, report, deadline);
+        },
+        releaseCapture(switchId) {
+            port?.releaseCapture(switchId);
         }
     };
 }

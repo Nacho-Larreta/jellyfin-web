@@ -14,6 +14,7 @@ import {
     SessionSwitchRecoveryRequiredError,
     SessionSwitchUnsupportedEngineError,
     assertSessionEnvelope,
+    assertStoredSessionEnvelope,
     createOwnerRecoverySession
 } from '../profileSelector/sessionSwitch/model';
 import { getWebSessionSwitchApplication } from '../profileSelector/sessionSwitch/application';
@@ -354,7 +355,7 @@ export class ServerConnections extends ConnectionManager {
 
         const authorityRevision = readSessionAuthorityRevision(server);
         const envelope = server.SessionSwitchEnvelope == null ? null : JSON.parse(JSON.stringify(server.SessionSwitchEnvelope));
-        if (envelope !== null) assertSessionEnvelope(envelope);
+        if (envelope !== null) assertStoredSessionEnvelope(envelope);
 
         return {
             serverId,
@@ -434,7 +435,7 @@ export class ServerConnections extends ConnectionManager {
         }
 
         const durableEnvelope = JSON.parse(JSON.stringify(envelope));
-        assertSessionEnvelope(durableEnvelope);
+        assertStoredSessionEnvelope(durableEnvelope);
         return durableEnvelope;
     }
 
@@ -467,7 +468,7 @@ export class ServerConnections extends ConnectionManager {
             }
 
             if (server.SessionSwitchEnvelope) {
-                assertSessionEnvelope(server.SessionSwitchEnvelope);
+                assertStoredSessionEnvelope(server.SessionSwitchEnvelope);
             }
             const actualRevision = server.SessionSwitchEnvelope?.revision ?? 0;
             if (actualRevision !== expectedRevision) {
@@ -511,7 +512,7 @@ export class ServerConnections extends ConnectionManager {
                 throw new ConcurrentSessionWriteError(0);
             }
 
-            assertSessionEnvelope(envelope);
+            assertStoredSessionEnvelope(envelope);
             if (envelope.revision !== expectedRevision || envelope.marker !== null) {
                 throw new ConcurrentSessionWriteError(envelope.revision);
             }
@@ -645,7 +646,7 @@ export class ServerConnections extends ConnectionManager {
             throw new Error('[ServerConnection] Login server is unavailable');
         }
         if (server.SessionSwitchEnvelope) {
-            assertSessionEnvelope(server.SessionSwitchEnvelope);
+            assertStoredSessionEnvelope(server.SessionSwitchEnvelope);
         }
         if (server.SessionSwitchEnvelope?.marker) {
             throw new SessionSwitchRecoveryRequiredError(server.SessionSwitchEnvelope.marker.switchId);
@@ -710,7 +711,7 @@ export class ServerConnections extends ConnectionManager {
                 throw new ConcurrentSessionWriteError(server?.SessionSwitchEnvelope?.revision ?? 0);
             }
             if (server.SessionSwitchEnvelope) {
-                assertSessionEnvelope(server.SessionSwitchEnvelope);
+                assertStoredSessionEnvelope(server.SessionSwitchEnvelope);
             }
             if (server.SessionSwitchEnvelope?.marker) {
                 throw new SessionSwitchRecoveryRequiredError(server.SessionSwitchEnvelope.marker.switchId);

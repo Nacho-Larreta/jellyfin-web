@@ -1,9 +1,13 @@
 import {
     CORRUPT_SESSION_STORAGE,
     SESSION_SWITCH_ENVELOPE_VERSION,
+    ConcurrentSessionWriteError,
     SessionStorageCorruptionError,
+    SessionSwitchRecoveryRequiredError,
     assertSessionEnvelope,
+    assertStoredSessionEnvelope,
     type ActiveProfileSession,
+    type LegacySessionSwitchEnvelope,
     type OwnerRecoverySession,
     type SessionEnvelopeObservation,
     type SessionSwitchEnvelope
@@ -41,15 +45,50 @@ export interface ServerConnectionsEnvelopePersistence {
 export class ServerConnectionsSessionSwitchStore implements AtomicSessionSwitchStore {
     constructor(private readonly persistence: ServerConnectionsEnvelopePersistence) {}
 
-    load(scope: SessionScope): Promise<SessionSwitchEnvelope | null> {
+    async load(scope: SessionScope): Promise<SessionSwitchEnvelope | null> {
         const stored = this.persistence.getSessionSwitchEnvelope(scope.serverId);
         if (stored === null || stored === undefined) {
-            return Promise.resolve(null);
+            return null;
         }
-
+        assertStoredSessionEnvelope(stored);
+        if (stored.version === 1) return this.migrateLegacy(scope, stored);
         const envelope = cloneEnvelope(stored);
         assertScope(envelope, scope);
-        return Promise.resolve(envelope);
+        return envelope;
+    }
+
+    private async migrateLegacy(
+        scope: SessionScope,
+        stored: LegacySessionSwitchEnvelope
+    ): Promise<SessionSwitchEnvelope> {
+        if (stored.marker !== null
+            && (stored.marker.kind !== 'PendingSwitch' || stored.marker.phase !== 'Preparing')) {
+            throw new SessionSwitchRecoveryRequiredError(stored.marker.switchId);
+        }
+        const marker = stored.marker === null ? null : { ...stored.marker, playbackReport: null };
+        try {
+            return await this.compareAndSwap(scope, stored.revision, {
+                ...stored,
+                version: SESSION_SWITCH_ENVELOPE_VERSION,
+                revision: stored.revision + 1,
+                marker
+            });
+        } catch (error) {
+            if (!(error instanceof ConcurrentSessionWriteError)) throw error;
+            return this.loadMigrationWinner(scope);
+        }
+    }
+
+    private loadMigrationWinner(scope: SessionScope): SessionSwitchEnvelope {
+        const current = this.persistence.getSessionSwitchEnvelope(scope.serverId);
+        if (current === null || current === undefined) throw new SessionStorageCorruptionError();
+        assertStoredSessionEnvelope(current);
+        if (current.version !== SESSION_SWITCH_ENVELOPE_VERSION) {
+            throw new SessionSwitchRecoveryRequiredError('legacy-session-envelope');
+        }
+        const winner = cloneEnvelope(current);
+        assertScope(winner, scope);
+        return winner;
     }
 
     compareAndSwap(

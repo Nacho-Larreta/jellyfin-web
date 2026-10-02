@@ -31,7 +31,8 @@ vi.mock('apps/stable/features/playback/utils/mediaSegmentManager', () => ({ bind
 vi.mock('apps/stable/features/playback/utils/mediaSessionSubscriber', () => ({ bindMediaSessionSubscriber: () => undefined }));
 vi.mock('./skipsegment.ts', () => ({ bindSkipSegment: () => undefined }));
 
-import { createActiveProfileSession } from '../../lib/profileSelector/sessionSwitch/model';
+import { createActiveProfileSession, type PendingPlaybackStop } from '../../lib/profileSelector/sessionSwitch/model';
+import { createSessionSwitchEnvelope } from '../../lib/profileSelector/sessionSwitch/store';
 import { WebPlaybackQuiescePort } from '../../lib/profileSelector/sessionSwitch/playback';
 import { PlaybackManager } from './playbackmanager';
 
@@ -104,13 +105,39 @@ function readyPlayer(mediaType = 'Video', playMethod = 'DirectPlay', extraPlayer
     const manager = new PlaybackManager();
     manager.setActivePlayer(player);
     const transport = vi.fn(async () => ({ Outcome: 'Acknowledged', ReportKey: reportKey }));
+    let pendingReport: PendingPlaybackStop | null = null;
     const port = new WebPlaybackQuiescePort(
         manager,
-        { getApiClient: () => ({ getUrl: (path: string) => `/old-api/${path}` }) },
+        { getApiClient: () => ({
+            getUrl: (path: string) => `http://local.test/old-api/${path}`,
+            serverId: () => 'server-old', serverAddress: () => 'http://local.test/old-api',
+            deviceId: () => 'device-old', getCurrentUserId: () => 'user-old',
+            accessToken: () => 'token-old'
+        }), getSessionSwitchEnvelope: () => ({
+            ...createSessionSwitchEnvelope(session),
+            marker: {
+                kind: 'PendingSwitch', phase: 'Quiescing', switchId,
+                serverId: session.serverId, deviceId: session.deviceId,
+                oldProfileUserId: session.profileUserId, oldEpoch: session.sessionEpoch,
+                targetProfileUserId: 'user-new', coordinatorId: 'coordinator-old',
+                fencingToken: 1, leaseExpiresAtMs: Date.now() + 60_000,
+                updatedAtMs: Date.now(), playbackReport: pendingReport
+            }
+        }) },
         { appName: () => 'Jellyfin Web', appVersion: () => '1', deviceName: () => 'Browser' },
         transport
     );
-    return { manager, player, documents, port, transport };
+    const quiesce = async () => {
+        const capture = await port.capture(session, switchId);
+        if (capture.outcome === 'Captured') pendingReport = capture.report;
+        return capture.outcome === 'Captured' ?
+            port.stopAndReport(session, switchId, capture.report, {
+                wallMs: Date.now() + 20_000,
+                monotonicMs: performance.now() + 20_000
+            }) :
+            { outcome: capture.outcome };
+    };
+    return { manager, player, documents, port, quiesce, transport };
 }
 
 describe('PlaybackManager profile switch stop with real bound handlers', () => {
@@ -156,15 +183,15 @@ describe('PlaybackManager profile switch stop with real bound handlers', () => {
     });
 
     it.each(['DirectPlay', 'Transcode'])('quiesces %s using the real manager with idle document plugins registered', async playMethod => {
-        const { manager, player, port, transport } = readyPlayer('Video', playMethod);
-        const result = port.stopAndReport(session, switchId);
+        const { manager, player, quiesce, transport } = readyPlayer('Video', playMethod);
+        const result = quiesce();
         await vi.runAllTimersAsync();
 
         expect(await result).toEqual({ outcome: 'Acknowledged', reportKey });
         expect(manager.currentItem(player)).toBeNull();
         expect(player.currentSrc()).not.toBeNull();
         expect(transport).toHaveBeenCalledWith(
-            `/old-api/ProfileSelectors/Current/Switches/${switchId}/PlaybackStopped`,
+            `http://local.test/old-api/ProfileSelectors/Current/Switches/${switchId}/PlaybackStopped`,
             expect.stringContaining('Token="token-old"'),
             { ItemId: item.Id, PlaySessionId: 'play-old', PositionTicks: 250_000, Failed: false, NextMediaType: null },
             10_000
@@ -173,16 +200,16 @@ describe('PlaybackManager profile switch stop with real bound handlers', () => {
     });
 
     it('proves absence without calling missing currentSrc on idle document plugins', async () => {
-        const { player, port, transport } = readyPlayer();
+        const { player, quiesce, transport } = readyPlayer();
         player.streamInfo = null;
         player.source = null;
 
-        expect(await port.stopAndReport(session, switchId)).toEqual({ outcome: 'NotActive' });
+        expect(await quiesce()).toEqual({ outcome: 'NotActive' });
         expect(transport).not.toHaveBeenCalled();
     });
 
     it('accepts absence after an ordinary HTML Video stop whose private source survives cleanup', async () => {
-        const { manager, player, port, transport } = readyPlayer();
+        const { manager, player, quiesce, transport } = readyPlayer();
 
         await manager.stop(player);
 
@@ -195,7 +222,7 @@ describe('PlaybackManager profile switch stop with real bound handlers', () => {
         expect(player.destroy).toHaveBeenCalledOnce();
         expect(manager.isPlaying(player)).toBe(true);
 
-        expect(await port.stopAndReport(session, switchId)).toEqual({ outcome: 'NotActive' });
+        expect(await quiesce()).toEqual({ outcome: 'NotActive' });
         expect(transport).not.toHaveBeenCalled();
     });
 
@@ -204,7 +231,7 @@ describe('PlaybackManager profile switch stop with real bound handlers', () => {
         reports.stopped.mockImplementationOnce(() => new Promise<void>(resolve => {
             acknowledgeReport = resolve;
         }));
-        const { manager, player, port, transport } = readyPlayer();
+        const { manager, player, quiesce, transport } = readyPlayer();
         try {
             await manager.stop(player);
 
@@ -213,35 +240,35 @@ describe('PlaybackManager profile switch stop with real bound handlers', () => {
             expect(manager.getCurrentPlayer()).toBeNull();
             expect(player.destroy).toHaveBeenCalledOnce();
             expect(manager.getProfileSwitchPlaybackStatus(player)).toBe('Pending');
-            expect(await port.stopAndReport(session, switchId)).toEqual({ outcome: 'Failed' });
+            expect(await quiesce()).toEqual({ outcome: 'Failed' });
             await vi.advanceTimersByTimeAsync(10_000);
-            expect(await port.stopAndReport(session, switchId)).toEqual({ outcome: 'Failed' });
+            expect(await quiesce()).toEqual({ outcome: 'Failed' });
         } finally {
             acknowledgeReport();
         }
         await Promise.resolve();
         expect(manager.getProfileSwitchPlaybackStatus(player)).toBe('Idle');
-        expect(await port.stopAndReport(session, switchId)).toEqual({ outcome: 'NotActive' });
+        expect(await quiesce()).toEqual({ outcome: 'NotActive' });
         expect(reports.stopped).toHaveBeenCalledOnce();
         expect(transport).not.toHaveBeenCalled();
     });
 
     it('requires verified recovery after an ordinary report rejection without an unhandled rejection or retry', async () => {
         reports.stopped.mockRejectedValueOnce(new Error('report delivery unknown'));
-        const { manager, player, port, transport } = readyPlayer();
+        const { manager, player, quiesce, transport } = readyPlayer();
         await manager.stop(player);
 
         expect(manager.getProfileSwitchPlaybackStatus(player)).toBe('RecoveryRequired');
-        expect(await port.stopAndReport(session, switchId)).toEqual({ outcome: 'Failed' });
+        expect(await quiesce()).toEqual({ outcome: 'Failed' });
         await vi.advanceTimersByTimeAsync(10_000);
-        expect(await port.stopAndReport(session, switchId)).toEqual({ outcome: 'Failed' });
+        expect(await quiesce()).toEqual({ outcome: 'Failed' });
         expect(manager.getProfileSwitchPlaybackStatus(player)).toBe('RecoveryRequired');
         expect(reports.stopped).toHaveBeenCalledOnce();
         expect(transport).not.toHaveBeenCalled();
     });
 
     it('does not publish idle while the physical stop promise is pending after cleanup', async () => {
-        const { manager, player, port } = readyPlayer();
+        const { manager, player, quiesce } = readyPlayer();
         let finishStop!: () => void;
         player.stop.mockImplementationOnce(() => {
             emitStop(player);
@@ -252,15 +279,15 @@ describe('PlaybackManager profile switch stop with real bound handlers', () => {
         const stopping = manager.stop(player);
         expect(manager.currentItem(player)).toBeNull();
         expect(manager.getProfileSwitchPlaybackStatus(player)).toBe('Pending');
-        expect(await port.stopAndReport(session, switchId)).toEqual({ outcome: 'Failed' });
+        expect(await quiesce()).toEqual({ outcome: 'Failed' });
 
         finishStop();
         await stopping;
-        expect(await port.stopAndReport(session, switchId)).toEqual({ outcome: 'NotActive' });
+        expect(await quiesce()).toEqual({ outcome: 'NotActive' });
     });
 
     it('blocks an old cleanup receipt before the first await of a new play request', async () => {
-        const { manager, player, port } = readyPlayer();
+        const { manager, player, quiesce } = readyPlayer();
         await manager.stop(player);
         expect(manager.getProfileSwitchPlaybackStatus(player)).toBe('Idle');
         let rejectPreparation!: (reason: Error) => void;
@@ -270,17 +297,17 @@ describe('PlaybackManager profile switch stop with real bound handlers', () => {
 
         const starting = manager.play({ serverId: 'server-old', ids: [item.Id], fullscreen: false });
         expect(manager.getProfileSwitchPlaybackStatus(player)).toBe('Pending');
-        expect(await port.stopAndReport(session, switchId)).toEqual({ outcome: 'Failed' });
+        expect(await quiesce()).toEqual({ outcome: 'Failed' });
 
         const rejected = expect(starting).rejects.toThrow('preparation failed');
         rejectPreparation(new Error('preparation failed'));
         await rejected;
         expect(manager.getProfileSwitchPlaybackStatus(player)).toBe('Idle');
-        expect(await port.stopAndReport(session, switchId)).toEqual({ outcome: 'NotActive' });
+        expect(await quiesce()).toEqual({ outcome: 'NotActive' });
     });
 
     it('invalidates cleanup before next-track preparation on a reused player', async () => {
-        const { manager, player, port } = readyPlayer();
+        const { manager, player, quiesce } = readyPlayer();
         await manager.stop(player);
         let cancelPreparation!: () => void;
         pluginRegistry.interceptors = [{
@@ -292,27 +319,27 @@ describe('PlaybackManager profile switch stop with real bound handlers', () => {
 
         manager.nextTrack(player);
         expect(manager.getProfileSwitchPlaybackStatus(player)).toBe('Pending');
-        expect(await port.stopAndReport(session, switchId)).toEqual({ outcome: 'Failed' });
+        expect(await quiesce()).toEqual({ outcome: 'Failed' });
 
         cancelPreparation();
         await vi.advanceTimersByTimeAsync(0);
         expect(manager.getProfileSwitchPlaybackStatus(player)).toBe('Unknown');
-        expect(await port.stopAndReport(session, switchId)).toEqual({ outcome: 'Failed' });
+        expect(await quiesce()).toEqual({ outcome: 'Failed' });
 
         player.streamInfo = stream(item, 'play-new');
         player.source = player.streamInfo.url;
         await manager.stop(player);
         expect(manager.getProfileSwitchPlaybackStatus(player)).toBe('Idle');
-        expect(await port.stopAndReport(session, switchId)).toEqual({ outcome: 'NotActive' });
+        expect(await quiesce()).toEqual({ outcome: 'NotActive' });
     });
 
     it('rejects a non-current document player that still owns an item', async () => {
-        const { player, documents, port, transport } = readyPlayer();
+        const { player, documents, quiesce, transport } = readyPlayer();
         player.streamInfo = null;
         player.source = null;
         documents[1].item = item;
 
-        expect(await port.stopAndReport(session, switchId)).toEqual({ outcome: 'Failed' });
+        expect(await quiesce()).toEqual({ outcome: 'Failed' });
         expect(transport).not.toHaveBeenCalled();
     });
 
@@ -320,20 +347,20 @@ describe('PlaybackManager profile switch stop with real bound handlers', () => {
         { name: 'Unknown remote', isLocalPlayer: false },
         { name: 'Google Cast', isLocalPlayer: false, isPlaying: () => false, _castPlayer: { session: {} } }
     ])('fails closed with $name registered even when the local player is absent', async remote => {
-        const { player, port, transport } = readyPlayer('Video', 'DirectPlay', [remote]);
+        const { player, quiesce, transport } = readyPlayer('Video', 'DirectPlay', [remote]);
         player.streamInfo = null;
         player.source = null;
 
-        expect(await port.stopAndReport(session, switchId)).toEqual({ outcome: 'Failed' });
+        expect(await quiesce()).toEqual({ outcome: 'Failed' });
         expect(transport).not.toHaveBeenCalled();
     });
 
     it('quiesces paused and buffering local playback with an item still present', async () => {
-        const { player, port } = readyPlayer();
+        const { player, quiesce } = readyPlayer();
         player.paused = () => true;
         player.source = null;
 
-        const result = port.stopAndReport(session, switchId);
+        const result = quiesce();
         await vi.runAllTimersAsync();
         expect(await result).toEqual({ outcome: 'Acknowledged', reportKey });
         expect(player.stop).toHaveBeenCalledOnce();

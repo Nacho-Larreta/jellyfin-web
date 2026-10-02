@@ -1,4 +1,18 @@
-export const SESSION_SWITCH_ENVELOPE_VERSION = 1 as const;
+export const SESSION_SWITCH_ENVELOPE_VERSION = 2 as const;
+
+export interface PendingPlaybackStop {
+    readonly version: 1;
+    readonly status: 'Captured' | 'Acknowledged' | 'NotActive';
+    readonly itemId: string;
+    readonly playSessionId: string;
+    readonly positionTicks: number;
+    readonly reportKey: string;
+    readonly endpointUrl: string;
+    readonly serverAddress: string;
+    readonly appName: string;
+    readonly appVersion: string;
+    readonly deviceName: string;
+}
 
 export interface ActiveCredentialRef {
     readonly scope: 'active-profile';
@@ -62,6 +76,15 @@ interface SwitchMarkerBase {
 export interface PendingSwitchRecord extends SwitchMarkerBase {
     readonly kind: 'PendingSwitch';
     readonly phase: PreCommitPhase;
+    readonly playbackReport: PendingPlaybackStop | null;
+}
+
+export function settledSwitchMarker(marker: PendingSwitchRecord): Omit<PendingSwitchRecord, 'playbackReport'> {
+    const { playbackReport, ...withoutReport } = marker;
+    if (playbackReport?.status === 'Captured') {
+        throw new TypeError('Cannot discard an unsettled playback report.');
+    }
+    return withoutReport;
 }
 
 export interface CommittedPendingCleanup extends SwitchMarkerBase {
@@ -86,6 +109,11 @@ export interface SessionSwitchEnvelope {
     readonly lastCompletion: SessionSwitchCompletionReceipt | null;
 }
 
+export interface LegacySessionSwitchEnvelope extends Omit<SessionSwitchEnvelope, 'version' | 'marker'> {
+    readonly version: 1;
+    readonly marker: null | Omit<PendingSwitchRecord, 'playbackReport'> | CommittedPendingCleanup | QuarantinedSession;
+}
+
 export interface SessionSwitchRequest {
     readonly switchId: string;
     readonly targetProfileUserId: string;
@@ -103,6 +131,8 @@ export interface ServerSwitchResult {
     readonly switchId: string;
     readonly targetProfileUserId: string;
     readonly state: ServerSwitchState;
+    readonly preparedExpiresAtMs?: number | null;
+    readonly preparedExpiresAtMonotonicMs?: number | null;
     readonly authentication: ServerSwitchAuthentication | null;
 }
 
@@ -248,9 +278,39 @@ export function assertSessionEnvelope(value: unknown): asserts value is SessionS
     }
 
     if (value.marker !== null) {
-        assertMarker(value.marker, value.activeSession);
+        assertMarker(value.marker, value.activeSession, false);
     }
 
+    if (value.lastCompletion !== null) {
+        assertCompletion(value.lastCompletion);
+        if (value.marker !== null
+            || value.lastCompletion.serverId !== value.activeSession.serverId
+            || value.lastCompletion.profileUserId !== value.activeSession.profileUserId
+            || value.lastCompletion.sessionEpoch !== value.activeSession.sessionEpoch) {
+            throw new TypeError('Completion receipt is not bound to the active terminal session.');
+        }
+    }
+}
+
+export function assertStoredSessionEnvelope(value: unknown): asserts value is SessionSwitchEnvelope | LegacySessionSwitchEnvelope {
+    if (!isRecord(value) || value.version !== 1) {
+        assertSessionEnvelope(value);
+        return;
+    }
+
+    assertExactKeys(value, [ 'version', 'revision', 'activeSession', 'recoverySession', 'marker', 'lastCompletion' ], 'legacy session switch envelope');
+    assertSessionEpoch(value.revision);
+    assertActiveSession(value.activeSession);
+    if (value.recoverySession !== null) {
+        assertRecoverySession(value.recoverySession);
+        if (value.recoverySession.serverId !== value.activeSession.serverId
+            || value.recoverySession.deviceId !== value.activeSession.deviceId) {
+            throw new TypeError('Recovery session is not bound to the active server and device.');
+        }
+    }
+    if (value.marker !== null) {
+        assertMarker(value.marker, value.activeSession, true);
+    }
     if (value.lastCompletion !== null) {
         assertCompletion(value.lastCompletion);
         if (value.marker !== null
@@ -291,7 +351,7 @@ function assertRecoverySession(value: unknown): asserts value is OwnerRecoverySe
     assertIdentifier(value.credentialRef.token, 'recovery credential');
 }
 
-function assertMarker(value: unknown, activeSession: ActiveProfileSession): asserts value is SessionSwitchMarker {
+function assertMarker(value: unknown, activeSession: ActiveProfileSession, legacy: boolean): asserts value is SessionSwitchMarker {
     if (!isRecord(value)
         || (value.kind !== 'PendingSwitch'
             && value.kind !== 'CommittedPendingCleanup'
@@ -299,26 +359,30 @@ function assertMarker(value: unknown, activeSession: ActiveProfileSession): asse
         throw new TypeError('Invalid session switch marker.');
     }
 
-    const markerKeys = [
-        'kind',
-        'phase',
-        'switchId',
-        'serverId',
-        'deviceId',
-        'oldProfileUserId',
-        'oldEpoch',
-        'targetProfileUserId',
-        'coordinatorId',
-        'fencingToken',
-        'leaseExpiresAtMs',
-        'updatedAtMs'
-    ];
-    assertExactKeys(
-        value,
-        value.kind === 'QuarantinedSession' ? [ ...markerKeys, 'reason' ] : markerKeys,
-        'session switch marker'
-    );
+    assertExactKeys(value, markerKeys(value.kind, legacy), 'session switch marker');
+    assertMarkerIdentifiers(value);
+    if (!validPhases(value.kind).includes(value.phase as string)) {
+        throw new TypeError('Invalid session switch marker phase.');
+    }
+    assertMarkerBinding(value, activeSession);
+    if (value.kind === 'PendingSwitch' && !legacy) assertPendingMarkerReport(value);
+    if (value.kind === 'QuarantinedSession' && value.reason !== 'IdentityMismatch') {
+        throw new TypeError('Invalid quarantine reason.');
+    }
+}
 
+function markerKeys(kind: SessionSwitchMarker['kind'], legacy: boolean): string[] {
+    const keys = [
+        'kind', 'phase', 'switchId', 'serverId', 'deviceId', 'oldProfileUserId',
+        'oldEpoch', 'targetProfileUserId', 'coordinatorId', 'fencingToken',
+        'leaseExpiresAtMs', 'updatedAtMs'
+    ];
+    if (kind === 'QuarantinedSession') keys.push('reason');
+    if (kind === 'PendingSwitch' && !legacy) keys.push('playbackReport');
+    return keys;
+}
+
+function assertMarkerIdentifiers(value: Record<string, unknown>): asserts value is Record<string, unknown> & { oldEpoch: number } {
     assertIdentifier(value.switchId, 'switchId');
     assertIdentifier(value.serverId, 'serverId');
     assertIdentifier(value.deviceId, 'deviceId');
@@ -332,13 +396,12 @@ function assertMarker(value: unknown, activeSession: ActiveProfileSession): asse
     if (typeof value.updatedAtMs !== 'number' || !Number.isSafeInteger(value.updatedAtMs) || value.updatedAtMs < 0) {
         throw new TypeError('Invalid session switch marker timestamp.');
     }
+}
 
-    const phases = validPhases(value.kind);
-
-    if (phases.indexOf(value.phase as string) === -1) {
-        throw new TypeError('Invalid session switch marker phase.');
-    }
-
+function assertMarkerBinding(
+    value: Record<string, unknown> & { oldEpoch: number },
+    activeSession: ActiveProfileSession
+): void {
     if (value.serverId !== activeSession.serverId || value.deviceId !== activeSession.deviceId) {
         throw new TypeError('Session switch marker is not bound to the active server and device.');
     }
@@ -353,10 +416,58 @@ function assertMarker(value: unknown, activeSession: ActiveProfileSession): asse
             || value.oldEpoch + 1 !== activeSession.sessionEpoch)) {
         throw new TypeError('Committed cleanup marker does not match the installed target epoch.');
     }
+}
 
-    if (value.kind === 'QuarantinedSession' && value.reason !== 'IdentityMismatch') {
-        throw new TypeError('Invalid quarantine reason.');
+function assertPendingMarkerReport(value: Record<string, unknown>): void {
+    if (value.playbackReport === null) return;
+    assertPendingPlaybackStop(value.playbackReport);
+    if (value.phase === 'Preparing') {
+        throw new TypeError('Preparing switch cannot contain a playback report.');
     }
+    if (value.phase !== 'Quiescing' && value.playbackReport.status === 'Captured') {
+        throw new TypeError('Unsettled playback report cannot advance to commit.');
+    }
+}
+
+function assertPendingPlaybackStop(value: unknown): asserts value is PendingPlaybackStop {
+    if (!isRecord(value) || value.version !== 1
+        || ![ 'Captured', 'Acknowledged', 'NotActive' ].includes(value.status as string)) {
+        throw new TypeError('Invalid pending playback report.');
+    }
+    assertExactKeys(value, [ 'version', 'status', 'itemId', 'playSessionId', 'positionTicks',
+        'reportKey', 'endpointUrl', 'serverAddress', 'appName', 'appVersion', 'deviceName' ], 'pending playback report');
+    if (!isJellyfinItemId(value.itemId)
+        || typeof value.playSessionId !== 'string' || !value.playSessionId || value.playSessionId.length > 255
+        || typeof value.positionTicks !== 'number' || !Number.isSafeInteger(value.positionTicks)
+        || value.positionTicks < 0 || typeof value.reportKey !== 'string' || !SHA256_HEX.test(value.reportKey)) {
+        throw new TypeError('Invalid pending playback report identity.');
+    }
+    for (const field of [ 'appName', 'appVersion', 'deviceName' ]) {
+        if (typeof value[field] !== 'string' || !value[field] || value[field].length > 128) {
+            throw new TypeError('Invalid pending playback report client identity.');
+        }
+    }
+    for (const field of [ 'endpointUrl', 'serverAddress' ]) {
+        if (typeof value[field] !== 'string' || value[field].length > 2048) {
+            throw new TypeError('Invalid pending playback report address.');
+        }
+        const url = new URL(value[field] as string);
+        if (![ 'http:', 'https:' ].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+            throw new TypeError('Invalid pending playback report address.');
+        }
+    }
+    const endpoint = new URL(value.endpointUrl as string);
+    const server = new URL(value.serverAddress as string);
+    if (endpoint.origin !== server.origin || !endpoint.pathname.startsWith(`${server.pathname.replace(/\/$/, '')}/`)) {
+        throw new TypeError('Playback report endpoint is outside its server address.');
+    }
+}
+
+const JELLYFIN_ITEM_ID = /^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+export function isJellyfinItemId(value: unknown): value is string {
+    return typeof value === 'string' && JELLYFIN_ITEM_ID.test(value);
 }
 
 function assertCompletion(value: unknown): asserts value is SessionSwitchCompletionReceipt {

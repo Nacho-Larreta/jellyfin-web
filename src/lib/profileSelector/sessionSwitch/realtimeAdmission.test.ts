@@ -97,7 +97,7 @@ function createHarness(probe = vi.fn(async () => ({ Id: 'user-a', ServerId: serv
         ...envelope!,
         revision: envelope!.revision + 1,
         marker: {
-            kind: 'PendingSwitch', phase: 'Preparing', switchId: 'switch-1',
+            kind: 'PendingSwitch', phase: 'Preparing', playbackReport: null, switchId: 'switch-1',
             serverId, deviceId, oldProfileUserId: 'user-a', oldEpoch: 1,
             targetProfileUserId: 'user-b', coordinatorId: 'coordinator-1',
             fencingToken: 1, leaseExpiresAtMs: 1000, updatedAtMs: 0

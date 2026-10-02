@@ -144,6 +144,7 @@ describe('SessionAdmissionBarrier', () => {
             marker: {
                 kind: 'PendingSwitch',
                 phase: 'Preparing',
+                playbackReport: null,
                 switchId: 'switch-1',
                 serverId: 'server-1',
                 deviceId: 'device-1',
