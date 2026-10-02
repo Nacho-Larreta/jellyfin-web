@@ -5,7 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import ConnectionErrorPage from 'components/ConnectionErrorPage';
 import ConnectionRequired from 'components/ConnectionRequired';
+import viewContainer from 'components/viewContainer';
 import { ConnectionState, ServerConnections } from 'lib/jellyfin-apiclient';
+import { ServerConnections as DurableServerConnections } from 'lib/jellyfin-apiclient/ServerConnections';
 import { createActiveProfileSession, type SessionSwitchCompletionReceipt, type SessionSwitchEnvelope } from 'lib/profileSelector/sessionSwitch/model';
 import { createSessionSwitchEnvelope } from 'lib/profileSelector/sessionSwitch/store';
 import events from 'utils/events';
@@ -31,11 +33,15 @@ vi.mock('lib/jellyfin-apiclient', () => ({
         firstConnection: false,
         getApiClient: vi.fn(),
         getSessionSwitchEnvelope: vi.fn(),
+        readFreshSessionAuthority: vi.fn(),
         subscribeSessionSwitchEnvelope: vi.fn()
     }
 }));
 vi.mock('components/loading/LoadingComponent', () => ({ default: () => 'Loading' }));
-vi.mock('components/apphost', () => ({ appHost: { supports: () => true } }));
+vi.mock('components/apphost', () => ({ appHost: {
+    supports: () => true,
+    appName: () => 'test', appVersion: () => '1', deviceName: () => 'test', deviceId: () => 'device-1'
+} }));
 vi.mock('components/autoFocuser', () => ({ default: { autoFocus: vi.fn() } }));
 vi.mock('components/layoutManager', () => ({ default: { tv: false } }));
 vi.mock('components/router/appRouter', () => ({ appRouter: { show: vi.fn() } }));
@@ -50,6 +56,9 @@ vi.mock('lib/profileSelector/sessionSwitch/application', () => ({
     })
 }));
 vi.mock('scripts/shell', () => ({ default: { openUrl: vi.fn() } }));
+vi.mock('scripts/settings/appSettings', () => ({ default: {} }));
+vi.mock('scripts/settings/userSettings', () => ({ setUserInfo: vi.fn() }));
+vi.mock('utils/dashboard', () => ({ default: { capabilities: () => ({}) } }));
 vi.mock('utils/jellyfin-apiclient/compat', () => ({
     toApi: vi.fn((client: { accessToken(): string }) => ({ token: client.accessToken() }))
 }));
@@ -140,6 +149,7 @@ const connections = ServerConnections as unknown as {
     firstConnection: boolean;
     getApiClient: ReturnType<typeof vi.fn>;
     getSessionSwitchEnvelope: ReturnType<typeof vi.fn>;
+    readFreshSessionAuthority: ReturnType<typeof vi.fn>;
     subscribeSessionSwitchEnvelope: ReturnType<typeof vi.fn>;
 };
 
@@ -187,6 +197,29 @@ beforeEach(() => {
     connections.firstConnection = false;
     connections.getApiClient.mockImplementation(() => currentClient);
     connections.getSessionSwitchEnvelope.mockImplementation(serverId => serverId === 'server-1' ? envelope : null);
+    connections.readFreshSessionAuthority.mockImplementation(serverId => {
+        if (serverId === 'server-2') {
+            return {
+                serverId,
+                userId: currentClient.getCurrentUserId(),
+                accessToken: currentClient.accessToken(),
+                selectorEnabled: false,
+                authorityRevision: 0,
+                envelope: null
+            };
+        }
+        if (serverId === 'server-1') {
+            return {
+                serverId,
+                userId: envelope?.activeSession.profileUserId || null,
+                accessToken: envelope?.activeSession.credentialRef.token || null,
+                selectorEnabled: true,
+                authorityRevision: envelope?.revision || 0,
+                envelope
+            };
+        }
+        return null;
+    });
     connections.subscribeSessionSwitchEnvelope.mockImplementation((_serverId, listener) => {
         subscribers.add(listener);
         return () => subscribers.delete(listener);
@@ -211,6 +244,223 @@ afterEach(async () => {
 });
 
 describe('ApiProvider session completion', () => {
+    it('revokes published context and cached views when durable marker appears before completion', async () => {
+        await mount();
+        expect(container.textContent).toBe('old-user:old-token');
+        queryClient.setQueryData([ 'old-profile' ], 'private');
+
+        await publishEnvelope(sessionEnvelope(false));
+
+        expect(container.textContent).toBe('Loading');
+        expect(queryClient.getQueryData([ 'old-profile' ])).toBeUndefined();
+        expect(subscribers.size).toBe(1);
+    });
+
+    it('revokes the provider from the real durable publisher after storage commits', async () => {
+        const key = 'api-publication-test';
+        const initial = oldSessionEnvelope();
+        let credentials = { Servers: [{
+            Id: 'server-1', UserId: 'old-user', AccessToken: 'old-token',
+            ProfileSelectorEnabled: true, SessionSwitchAuthorityRevision: 0,
+            SessionSwitchEnvelope: initial
+        }] };
+        const storage = new Map([[ key, JSON.stringify(credentials) ]]);
+        const provider = {
+            key,
+            appStorage: {
+                getItem: (name: string) => storage.get(name) ?? null,
+                setItem: (name: string, value: string) => { storage.set(name, value); }
+            },
+            credentials(next?: typeof credentials) {
+                if (next) {
+                    credentials = next;
+                    storage.set(key, JSON.stringify(next));
+                }
+                return credentials;
+            }
+        };
+        Object.defineProperty(navigator, 'locks', {
+            configurable: true,
+            value: { request: (_name: string, _options: unknown, operation: (lock: object) => unknown) => operation({}) }
+        });
+        const durable = new DurableServerConnections(provider, 'test', '1', 'test', 'device-1', {});
+        connections.readFreshSessionAuthority.mockImplementation(serverId => durable.readFreshSessionAuthority(serverId));
+        connections.subscribeSessionSwitchEnvelope.mockImplementation((serverId, listener) =>
+            durable.subscribeSessionSwitchEnvelope(serverId, listener));
+        await mount();
+        expect(container.textContent).toBe('old-user:old-token');
+        queryClient.setQueryData([ 'old-profile' ], 'private');
+
+        await act(async () => durable.replaceSessionSwitchEnvelope('server-1', initial.revision, {
+            ...sessionEnvelope(false), revision: initial.revision + 1
+        }));
+
+        expect(durable.readFreshSessionAuthority('server-1')?.envelope?.marker?.switchId).toBe(receipt.switchId);
+        expect(container.textContent).toBe('Loading');
+        expect(queryClient.getQueryData([ 'old-profile' ])).toBeUndefined();
+    });
+
+    it('closes once across marker phases and restores the old verified session without completion', async () => {
+        await mount();
+        vi.mocked(viewContainer.reset).mockClear();
+        const clear = vi.spyOn(queryClient, 'clear');
+        const marker = sessionEnvelope(false);
+        await publishEnvelope(marker);
+        expect(container.textContent).toBe('Loading');
+        await publishEnvelope({
+            ...marker,
+            revision: 4,
+            marker: { ...marker.marker!, kind: 'CommittedPendingCleanup', phase: 'Resetting' }
+        });
+        expect(clear).toHaveBeenCalledOnce();
+        expect(viewContainer.reset).toHaveBeenCalledOnce();
+
+        await publishEnvelope({ ...oldSessionEnvelope(), revision: 5 });
+        expect(container.textContent).toBe('old-user:old-token');
+        clear.mockRestore();
+    });
+
+    it('does not reopen a revoked generation after a selector availability ABA cycle', async () => {
+        let selectorEnabled = false;
+        connections.readFreshSessionAuthority.mockImplementation(() => ({
+            serverId: 'server-1', userId: 'old-user', accessToken: 'old-token',
+            selectorEnabled, authorityRevision: 0, envelope: null
+        }));
+        await mount();
+        expect(container.textContent).toBe('old-user:old-token');
+
+        selectorEnabled = true;
+        await act(async () => {
+            subscribers.forEach(listener => {
+                listener(null);
+            });
+        });
+        expect(container.textContent).toBe('Loading');
+        selectorEnabled = false;
+        await act(async () => {
+            subscribers.forEach(listener => {
+                listener(null);
+            });
+        });
+        expect(container.textContent).toBe('Loading');
+    });
+
+    it('does not publish a matching receipt when the identity probe returns the wrong user', async () => {
+        await mount();
+        await publishEnvelope(sessionEnvelope(false));
+        currentClient = newClient;
+        newClient.getCurrentUser.mockResolvedValueOnce({ Id: 'foreign-user', ServerId: 'server-1' });
+        await publishEnvelope(sessionEnvelope(true));
+
+        expect(container.textContent).toContain('HeaderServerUnavailable');
+    });
+
+    it('clears published context and cached queries on ordinary logout', async () => {
+        await mount();
+        queryClient.setQueryData([ 'old-profile' ], 'private');
+        await act(async () => events.trigger(ServerConnections, 'localusersignedout'));
+
+        expect(container.textContent).toBe('no-user:no-token');
+        expect(queryClient.getQueryData([ 'old-profile' ])).toBeUndefined();
+        expect(subscribers.size).toBe(0);
+    });
+
+    it('keeps the cold-start router alive to begin protected-route recovery', async () => {
+        envelope = sessionEnvelope(false);
+        await mount(undefined, (
+            <MemoryRouter initialEntries={[ '/profileselector' ]}>
+                <Routes>
+                    <Route element={<ConnectionRequired level='user' />}>
+                        <Route path='/profileselector' element={<div>Protected profile selector <Snapshot /></div>} />
+                    </Route>
+                </Routes>
+            </MemoryRouter>
+        ));
+
+        expect(routeBootstrap.prepare).toHaveBeenCalledWith(oldClient);
+        expect(container.textContent).not.toContain('Protected profile selector');
+        expect(subscribers.size).toBe(1);
+    });
+
+    it('reopens the cold-start old session after route recovery clears its marker without completion', async () => {
+        envelope = sessionEnvelope(false);
+        routeBootstrap.prepare.mockImplementation(async () => {
+            envelope = { ...oldSessionEnvelope(), revision: 5 };
+            subscribers.forEach(listener => {
+                listener(envelope);
+            });
+            return { selector: null, activeSession: envelope.activeSession };
+        });
+        await mount(undefined, (
+            <MemoryRouter initialEntries={[ '/profileselector' ]}>
+                <Routes>
+                    <Route element={<ConnectionRequired level='user' />}>
+                        <Route path='/profileselector' element={<div>Protected profile selector <Snapshot /></div>} />
+                    </Route>
+                </Routes>
+            </MemoryRouter>
+        ));
+
+        expect(routeBootstrap.prepare).toHaveBeenCalledOnce();
+        expect(container.textContent).toContain('Protected profile selector old-user:old-token');
+    });
+
+    it('does not restore the cold old identity when its credential changed', async () => {
+        envelope = sessionEnvelope(false);
+        await mount();
+        const changed = apiClient('old-user', 'changed-token');
+        currentClient = changed;
+        const restored = oldSessionEnvelope();
+        await publishEnvelope({
+            ...restored,
+            revision: 5,
+            activeSession: createActiveProfileSession('server-1', 'device-1', 'old-user', 'changed-token', 0)
+        });
+
+        expect(container.textContent).toBe('no-user:no-token');
+    });
+
+    it('discards a cold-start identity probe when a marker arrives before it resolves', async () => {
+        const pendingUser = deferredUser();
+        oldClient.getCurrentUser.mockImplementationOnce(() => pendingUser.promise);
+        await mount();
+        expect(container.textContent).toBe('no-user:no-token');
+
+        await publishEnvelope(sessionEnvelope(false));
+        await act(async () => pendingUser.release({ Id: 'old-user', ServerId: 'server-1' }));
+
+        expect(container.textContent).toBe('no-user:no-token');
+    });
+
+    it('does not publish if authority changes during context construction', async () => {
+        routeBootstrap.capture.mockImplementationOnce(() => {
+            envelope = sessionEnvelope(false);
+            subscribers.forEach(listener => {
+                listener(envelope);
+            });
+            return null;
+        });
+
+        await mount();
+
+        expect(container.textContent).toBe('no-user:no-token');
+    });
+
+    it('ignores duplicate and foreign completion signals after publishing the target', async () => {
+        await mount();
+        await publishEnvelope(sessionEnvelope(false));
+        currentClient = newClient;
+        await publishEnvelope(sessionEnvelope(true));
+        expect(container.textContent).toBe('new-user:new-token');
+        queryClient.setQueryData([ 'new-profile' ], 'new-private');
+
+        await act(async () => events.trigger(ServerConnections, 'sessionswitchcompleted', [ receipt ]));
+        await act(async () => events.trigger(ServerConnections, 'sessionswitchcompleted', [
+            { ...receipt, switchId: 'foreign' }
+        ]));
+        expect(container.textContent).toBe('new-user:new-token');
+        expect(queryClient.getQueryData([ 'new-profile' ])).toBe('new-private');
+    });
     it('keeps the anonymous provider empty while a public server route resolves', async () => {
         connections.currentApiClient.mockImplementation(() => undefined);
         connections.connect.mockResolvedValue({ State: 'ServerSelection' });
@@ -271,7 +521,7 @@ describe('ApiProvider session completion', () => {
 
         await publishEnvelope(sessionEnvelope(true));
         expect(container.textContent).toBe('new-user:new-token');
-        expect(subscribers.size).toBe(0);
+        expect(subscribers.size).toBe(1);
     });
 
     it('does not publish a foreign receipt or a late user response after logout', async () => {
@@ -296,7 +546,7 @@ describe('ApiProvider session completion', () => {
         await complete();
         expect(container.textContent).toBe('new-user:new-token');
         expect(connections.subscribeSessionSwitchEnvelope).toHaveBeenCalled();
-        expect(subscribers.size).toBe(0);
+        expect(subscribers.size).toBe(1);
     });
 
     it('recreates the SDK when the same legacy ApiClient receives the new token', async () => {
@@ -470,6 +720,7 @@ describe('ApiProvider session completion', () => {
         await act(async () => events.trigger(ServerConnections, 'localusersignedin', [
             { Id: 'other-user', ServerId: 'server-2' }
         ]));
+        await act(async () => Promise.resolve());
         expect(container.textContent).toContain('Login route other-user:other-token');
     });
 

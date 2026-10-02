@@ -1,7 +1,7 @@
 import type { Api } from '@jellyfin/sdk';
 import type { UserDto } from '@jellyfin/sdk/lib/generated-client';
 import type { ApiClient, Event } from 'jellyfin-apiclient';
-import React, { type FC, type PropsWithChildren, createContext, useCallback, useContext, useEffect, useState } from 'react';
+import React, { type FC, type PropsWithChildren, createContext, useCallback, useContext, useLayoutEffect, useState } from 'react';
 import { flushSync } from 'react-dom';
 
 import ConnectionErrorPage from 'components/ConnectionErrorPage';
@@ -9,17 +9,22 @@ import Loading from 'components/loading/LoadingComponent';
 import viewContainer from 'components/viewContainer';
 import { ConnectionState, ServerConnections } from 'lib/jellyfin-apiclient';
 import { getWebSessionSwitchApplication } from 'lib/profileSelector/sessionSwitch/application';
-import { type BoundSessionReadIdentity } from 'lib/profileSelector/sessionSwitch/boundRequests';
-import {
-    assertSessionEnvelope,
-    type SessionSwitchCompletionReceipt,
-    type SessionSwitchEnvelope
-} from 'lib/profileSelector/sessionSwitch/model';
+import type { BoundSessionReadIdentity, FreshSessionAuthority } from 'lib/profileSelector/sessionSwitch/boundRequests';
+import type { SessionSwitchCompletionReceipt } from 'lib/profileSelector/sessionSwitch/model';
 import events from 'utils/events';
 import { toApi } from 'utils/jellyfin-apiclient/compat';
 import { createSessionScopedReadApi, type SessionScopedReadApi } from 'utils/jellyfin-apiclient/sessionReadApi';
 import { type BoundUserViewsRead } from 'utils/jellyfin-apiclient/boundUserViewsQuery';
 import { queryClient } from 'utils/query/queryClient';
+
+import {
+    capturePendingOldAuthority,
+    matchesCompletion,
+    samePublication,
+    sameRestoredSession,
+    verifiedAuthority,
+    type PublishedAuthority
+} from './apiPublicationAuthority';
 
 export interface JellyfinApiContext {
     __legacyApiClient__?: ApiClient
@@ -38,25 +43,6 @@ const SERVER_SELECTION_ROUTE = '#/selectserver';
 
 function reloadCurrentPage() {
     window.location.reload();
-}
-
-function isCompletedEnvelope(value: unknown, receipt: SessionSwitchCompletionReceipt): value is SessionSwitchEnvelope {
-    if (value === null) return false;
-    try {
-        assertSessionEnvelope(value);
-    } catch {
-        return false;
-    }
-
-    const completion = value.lastCompletion;
-    return value.marker === null
-        && completion?.switchId === receipt.switchId
-        && completion.serverId === receipt.serverId
-        && completion.profileUserId === receipt.profileUserId
-        && completion.sessionEpoch === receipt.sessionEpoch
-        && value.activeSession.serverId === receipt.serverId
-        && value.activeSession.profileUserId === receipt.profileUserId
-        && value.activeSession.sessionEpoch === receipt.sessionEpoch;
 }
 
 function createPublishedContext(client: ApiClient, user: UserDto, serverId: string): JellyfinApiContext {
@@ -87,17 +73,20 @@ export const ApiProvider: FC<PropsWithChildren<ApiProviderProps>> = ({
         reloadPage();
     }, [ reloadPage ]);
 
-    useEffect(() => {
+    useLayoutEffect(() => {
         let generation = 0;
         let mounted = true;
-        let completionInProgress = false;
+        let publishedAuthority: PublishedAuthority | null = null;
+        let closedAuthority: PublishedAuthority | null = null;
+        let coldOldAuthority: PublishedAuthority | null = null;
+        let restoreAllowed = false;
+        let observedSwitchId: string | null = null;
+        let observedServerId: string | null = null;
         let unsubscribeEnvelope: (() => void) | undefined;
         let completionTimeout: number | undefined;
+        let resolvingGeneration: number | null = null;
 
-        const cancelPendingCompletion = () => {
-            generation++;
-            unsubscribeEnvelope?.();
-            unsubscribeEnvelope = undefined;
+        const clearCompletionTimeout = () => {
             window.clearTimeout(completionTimeout);
             completionTimeout = undefined;
         };
@@ -105,89 +94,40 @@ export const ApiProvider: FC<PropsWithChildren<ApiProviderProps>> = ({
         const showUnavailable = (expectedGeneration: number) => {
             if (!mounted || generation !== expectedGeneration) return;
             generation++;
+            resolvingGeneration = null;
+            clearCompletionTimeout();
             unsubscribeEnvelope?.();
             unsubscribeEnvelope = undefined;
-            window.clearTimeout(completionTimeout);
-            completionTimeout = undefined;
             setAvailability('unavailable');
         };
 
-        const updateApiUser = (_e: Event | undefined, newUser: UserDto) => {
-            if (!mounted || completionInProgress || !newUser?.Id) return;
+        const readAuthority = (serverId: string): FreshSessionAuthority | null => {
+            try {
+                return ServerConnections.readFreshSessionAuthority(serverId);
+            } catch {
+                return null;
+            }
+        };
+
+        const currentAuthority = (serverId: string, fresh: FreshSessionAuthority | null) => {
             const client = ServerConnections.currentApiClient();
-            const serverId = newUser.ServerId || client?.serverId();
-            if (!client || !serverId || client.serverId() !== serverId
-                || ServerConnections.getApiClient(serverId) !== client
-                || client.getCurrentUserId() !== newUser.Id
-                || !client.accessToken()) return;
-
-            let published: JellyfinApiContext;
-            try {
-                const envelope = ServerConnections.getSessionSwitchEnvelope(serverId);
-                if (envelope && (envelope.marker !== null
-                    || envelope.activeSession.serverId !== serverId
-                    || envelope.activeSession.profileUserId !== newUser.Id
-                    || envelope.activeSession.credentialRef.token !== client.accessToken())) return;
-                published = createPublishedContext(client, newUser, serverId);
-            } catch {
-                cancelPendingCompletion();
-                setContext({});
-                setAvailability('unavailable');
-                return;
-            }
-
-            cancelPendingCompletion();
-            setContext(published);
-            setAvailability('ready');
+            return client && verifiedAuthority(
+                client,
+                fresh,
+                client,
+                ServerConnections.getApiClient(serverId)
+            );
         };
 
-        const resetApiUser = () => {
-            cancelPendingCompletion();
-            completionInProgress = false;
-            if (!mounted) return;
-            setContext({});
-            setAvailability('ready');
-        };
-
-        const resolveCompletion = async (receipt: SessionSwitchCompletionReceipt, expectedGeneration: number) => {
-            try {
-                const client = ServerConnections.getApiClient(receipt.serverId);
-                const envelope = ServerConnections.getSessionSwitchEnvelope(receipt.serverId);
-                if (!client || client !== ServerConnections.currentApiClient()
-                    || !isCompletedEnvelope(envelope, receipt)
-                    || client.getCurrentUserId() !== receipt.profileUserId
-                    || client.accessToken() !== envelope.activeSession.credentialRef.token) {
-                    showUnavailable(expectedGeneration);
-                    return;
-                }
-
-                const user = await client.getCurrentUser();
-                if (!mounted || generation !== expectedGeneration) return;
-                const currentEnvelope = ServerConnections.getSessionSwitchEnvelope(receipt.serverId);
-                if (!isCompletedEnvelope(currentEnvelope, receipt)
-                    || client !== ServerConnections.currentApiClient()
-                    || client.getCurrentUserId() !== receipt.profileUserId
-                    || client.accessToken() !== currentEnvelope.activeSession.credentialRef.token
-                    || user?.Id !== receipt.profileUserId
-                    || user.ServerId && user.ServerId !== receipt.serverId) {
-                    showUnavailable(expectedGeneration);
-                    return;
-                }
-
-                const published = createPublishedContext(client, user, receipt.serverId);
-                cancelPendingCompletion();
-                completionInProgress = false;
-                setContext(published);
-                setAvailability('ready');
-            } catch {
-                showUnavailable(expectedGeneration);
-            }
-        };
-
-        const onSessionSwitchCompleted = (_e: Event, receipt: SessionSwitchCompletionReceipt) => {
-            cancelPendingCompletion();
-            if (!mounted) return;
-            completionInProgress = true;
+        const closePublished = (fresh: FreshSessionAuthority | null) => {
+            if (!publishedAuthority) return;
+            closedAuthority = publishedAuthority;
+            publishedAuthority = null;
+            restoreAllowed = !!fresh?.envelope?.marker;
+            observedSwitchId = fresh?.envelope?.marker?.switchId || observedSwitchId;
+            generation++;
+            resolvingGeneration = null;
+            clearCompletionTimeout();
             const expectedGeneration = generation;
             flushSync(() => {
                 setContext({});
@@ -196,55 +136,213 @@ export const ApiProvider: FC<PropsWithChildren<ApiProviderProps>> = ({
             void queryClient.cancelQueries();
             queryClient.clear();
             viewContainer.reset();
+            completionTimeout = window.setTimeout(() => showUnavailable(expectedGeneration), COMPLETION_WAIT_MS);
+        };
 
-            let resolving = false;
-            const inspectEnvelope = (value: unknown) => {
-                if (!mounted || generation !== expectedGeneration || resolving
-                    || !isCompletedEnvelope(value, receipt)) return;
-                resolving = true;
-                void resolveCompletion(receipt, expectedGeneration);
-            };
-
+        const probeAndPublish = async (
+            candidate: PublishedAuthority,
+            mode: 'initial' | 'target' | 'restored',
+            expectedGeneration: number
+        ) => {
             try {
-                unsubscribeEnvelope = ServerConnections.subscribeSessionSwitchEnvelope(
-                    receipt.serverId,
-                    inspectEnvelope
-                );
-                inspectEnvelope(ServerConnections.getSessionSwitchEnvelope(receipt.serverId));
-                completionTimeout = window.setTimeout(() => showUnavailable(expectedGeneration), COMPLETION_WAIT_MS);
+                const user = await candidate.client.getCurrentUser();
+                if (!mounted || generation !== expectedGeneration) return;
+                const fresh = readAuthority(candidate.serverId);
+                const latest = currentAuthority(candidate.serverId, fresh);
+                const restoredAuthority = closedAuthority || coldOldAuthority;
+                if (!latest || !samePublication(candidate, latest)
+                    || user?.Id !== candidate.userId
+                    || user.ServerId && user.ServerId !== candidate.serverId
+                    || mode === 'target' && (!fresh || !observedSwitchId
+                        || !matchesCompletion(fresh, observedSwitchId, latest))
+                    || mode === 'restored' && (!restoredAuthority
+                        || !sameRestoredSession(restoredAuthority, latest))) {
+                    showUnavailable(expectedGeneration);
+                    return;
+                }
+
+                const published = createPublishedContext(candidate.client, user, candidate.serverId);
+                const finalAuthority = currentAuthority(candidate.serverId, readAuthority(candidate.serverId));
+                if (!mounted || generation !== expectedGeneration
+                    || !finalAuthority || !samePublication(candidate, finalAuthority)) {
+                    if (generation === expectedGeneration) {
+                        generation++;
+                        resolvingGeneration = null;
+                    }
+                    inspectAuthority();
+                    return;
+                }
+                publishedAuthority = latest;
+                closedAuthority = null;
+                coldOldAuthority = null;
+                restoreAllowed = false;
+                observedSwitchId = null;
+                resolvingGeneration = null;
+                clearCompletionTimeout();
+                generation++;
+                setContext(published);
+                setAvailability('ready');
             } catch {
                 showUnavailable(expectedGeneration);
             }
+        };
+
+        const publicationMode = (
+            fresh: FreshSessionAuthority,
+            latest: PublishedAuthority
+        ): 'initial' | 'target' | 'restored' | null => {
+            if (closedAuthority) {
+                if (restoreAllowed && sameRestoredSession(closedAuthority, latest)) return 'restored';
+                if (observedSwitchId && matchesCompletion(fresh, observedSwitchId, latest)) return 'target';
+                return null;
+            }
+            if (coldOldAuthority && sameRestoredSession(coldOldAuthority, latest)) return 'restored';
+            if (observedSwitchId) {
+                return matchesCompletion(fresh, observedSwitchId, latest) ? 'target' : null;
+            }
+            return 'initial';
+        };
+
+        const observePendingMarker = (fresh: FreshSessionAuthority, serverId: string) => {
+            const switchId = fresh.envelope?.marker?.switchId;
+            if (!switchId) return;
+            if (!closedAuthority && observedSwitchId !== switchId) {
+                const client = ServerConnections.currentApiClient();
+                coldOldAuthority = client ? capturePendingOldAuthority(
+                    client,
+                    fresh,
+                    ServerConnections.getApiClient(serverId)
+                ) : null;
+            }
+            if (resolvingGeneration === generation || observedSwitchId !== switchId) {
+                generation++;
+                resolvingGeneration = null;
+                if (closedAuthority) {
+                    clearCompletionTimeout();
+                    const expectedGeneration = generation;
+                    completionTimeout = window.setTimeout(
+                        () => showUnavailable(expectedGeneration),
+                        COMPLETION_WAIT_MS
+                    );
+                }
+            }
+            observedSwitchId = switchId;
+        };
+
+        const inspectAuthority = () => {
+            if (!mounted || !observedServerId) return;
+            const fresh = readAuthority(observedServerId);
+            const latest = currentAuthority(observedServerId, fresh);
+            if (publishedAuthority && (!latest || !samePublication(publishedAuthority, latest))) {
+                closePublished(fresh);
+            }
+            if (publishedAuthority || !fresh) return;
+            if (fresh.envelope?.marker) {
+                observePendingMarker(fresh, observedServerId);
+                return;
+            }
+            if (!latest || resolvingGeneration === generation) return;
+
+            const mode = publicationMode(fresh, latest);
+            if (!mode) return;
+            resolvingGeneration = generation;
+            void probeAndPublish(latest, mode, generation);
+        };
+
+        const observeServer = (serverId: string) => {
+            if (observedServerId === serverId && unsubscribeEnvelope) return;
+            unsubscribeEnvelope?.();
+            observedServerId = serverId;
+            try {
+                unsubscribeEnvelope = ServerConnections.subscribeSessionSwitchEnvelope(serverId, inspectAuthority);
+                inspectAuthority();
+            } catch {
+                showUnavailable(generation);
+            }
+        };
+
+        const updateApiUser = (_e: Event | undefined, newUser: UserDto) => {
+            if (!mounted || !newUser?.Id) return;
+            const client = ServerConnections.currentApiClient();
+            const serverId = newUser.ServerId || client?.serverId();
+            if (!client || !serverId || client.getCurrentUserId() !== newUser.Id) return;
+            if (closedAuthority && observedServerId === serverId) return;
+            if (observedServerId && observedServerId !== serverId) {
+                closePublished(null);
+                generation++;
+                resolvingGeneration = null;
+                clearCompletionTimeout();
+                closedAuthority = null;
+                coldOldAuthority = null;
+                restoreAllowed = false;
+                observedSwitchId = null;
+            }
+            observeServer(serverId);
+            inspectAuthority();
+        };
+
+        const resetApiUser = () => {
+            const hadPublished = !!publishedAuthority;
+            generation++;
+            resolvingGeneration = null;
+            publishedAuthority = null;
+            closedAuthority = null;
+            coldOldAuthority = null;
+            restoreAllowed = false;
+            observedSwitchId = null;
+            clearCompletionTimeout();
+            unsubscribeEnvelope?.();
+            unsubscribeEnvelope = undefined;
+            observedServerId = null;
+            if (!mounted) return;
+            flushSync(() => {
+                setContext({});
+                setAvailability('ready');
+            });
+            if (hadPublished) {
+                void queryClient.cancelQueries();
+                queryClient.clear();
+                viewContainer.reset();
+            }
+        };
+
+        const onSessionSwitchCompleted = (_e: Event, receipt: SessionSwitchCompletionReceipt) => {
+            if (!mounted || !receipt || receipt.serverId !== observedServerId) return;
+            const fresh = readAuthority(receipt.serverId);
+            const belongs = fresh?.envelope?.marker?.switchId === receipt.switchId
+                || observedSwitchId === receipt.switchId
+                || fresh?.envelope?.lastCompletion?.switchId === receipt.switchId
+                    && fresh.envelope.lastCompletion.profileUserId === receipt.profileUserId
+                    && fresh.envelope.lastCompletion.sessionEpoch === receipt.sessionEpoch
+                    && (!publishedAuthority || publishedAuthority.userId !== receipt.profileUserId
+                        || publishedAuthority.epoch !== receipt.sessionEpoch);
+            if (!belongs) return;
+            if (publishedAuthority) observedSwitchId = receipt.switchId;
+            if (closedAuthority && observedSwitchId !== receipt.switchId) {
+                generation++;
+                resolvingGeneration = null;
+                clearCompletionTimeout();
+                observedSwitchId = receipt.switchId;
+                const expectedGeneration = generation;
+                completionTimeout = window.setTimeout(() => showUnavailable(expectedGeneration), COMPLETION_WAIT_MS);
+            }
+            inspectAuthority();
         };
 
         events.on(ServerConnections, 'localusersignedin', updateApiUser);
         events.on(ServerConnections, 'localusersignedout', resetApiUser);
         events.on(ServerConnections, 'sessionswitchcompleted', onSessionSwitchCompleted);
 
-        const initialGeneration = generation;
         const initialClient = ServerConnections.currentApiClient();
         if (initialClient) {
-            try {
-                const initialEnvelope = ServerConnections.getSessionSwitchEnvelope(initialClient.serverId());
-                if (!initialEnvelope?.marker) {
-                    void initialClient.getCurrentUser()
-                        .then(user => {
-                            if (mounted && generation === initialGeneration) updateApiUser(undefined, user);
-                        })
-                        .catch(err => {
-                            if (mounted && generation === initialGeneration) {
-                                console.info('[ApiProvider] Could not get current user', err);
-                            }
-                        });
-                }
-            } catch {
-                setAvailability('unavailable');
-            }
+            observeServer(initialClient.serverId());
         }
 
         return () => {
             mounted = false;
-            cancelPendingCompletion();
+            generation++;
+            clearCompletionTimeout();
+            unsubscribeEnvelope?.();
             events.off(ServerConnections, 'localusersignedin', updateApiUser);
             events.off(ServerConnections, 'localusersignedout', resetApiUser);
             events.off(ServerConnections, 'sessionswitchcompleted', onSessionSwitchCompleted);
