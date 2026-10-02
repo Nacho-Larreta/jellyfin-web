@@ -1,7 +1,11 @@
 import type { ApiClient, WebSocketDeliveryContext } from 'jellyfin-apiclient';
 import { describe, expect, it, vi } from 'vitest';
 
-import { createActiveProfileSession, type SessionSwitchEnvelope } from './model';
+import {
+    createActiveProfileSession,
+    type SessionSwitchCompletionReceipt,
+    type SessionSwitchEnvelope
+} from './model';
 import { WebSocketSessionAdmission } from './realtimeAdmission';
 import { createSessionSwitchEnvelope } from './store';
 
@@ -126,6 +130,13 @@ function createHarness(probe = vi.fn(async () => ({ Id: 'user-a', ServerId: serv
             revision++;
             notifyEnvelope();
         },
+        setCompletion: (receipt: SessionSwitchCompletionReceipt | null) => {
+            envelope = {
+                ...envelope!, revision: envelope!.revision + 1, lastCompletion: receipt
+            };
+            revision++;
+            notifyEnvelope();
+        },
         restoreOld: () => {
             userId = 'user-a';
             token = 'token-a';
@@ -164,6 +175,10 @@ function createHarness(probe = vi.fn(async () => ({ Id: 'user-a', ServerId: serv
 }
 
 describe('WebSocketSessionAdmission', () => {
+    const targetReceipt: SessionSwitchCompletionReceipt = {
+        switchId: 'switch-1', serverId, profileUserId: 'user-b', sessionEpoch: 2
+    };
+
     it('denies marker delivery and verifies target only after terminal authority and admission', async () => {
         const probe = vi.fn(async (_client, port) => ({
             Id: port.binding.profileUserId, ServerId: serverId
@@ -231,6 +246,56 @@ describe('WebSocketSessionAdmission', () => {
         expect(probe).toHaveBeenCalledTimes(1);
         expect(harness.client.ensureWebSocket).toHaveBeenCalledTimes(1);
         expect(harness.getProvider()!()).toBeNull();
+    });
+
+    it.each([
+        ['foreign switch', { ...targetReceipt, switchId: 'switch-elsewhere' }],
+        ['foreign server', { ...targetReceipt, serverId: 'server-elsewhere' }],
+        ['foreign user', { ...targetReceipt, profileUserId: 'user-elsewhere' }],
+        ['stale epoch', { ...targetReceipt, sessionEpoch: 1 }]
+    ])('does not treat a persisted %s receipt as target readiness', async (_label, receipt) => {
+        const probe = vi.fn(async (_client, port) => ({
+            Id: port.binding.profileUserId, ServerId: serverId
+        }));
+        const harness = createHarness(probe);
+        harness.controller.register(harness.client);
+        await vi.waitFor(() => expect(harness.client.ensureWebSocket).toHaveBeenCalledOnce());
+
+        harness.mark();
+        harness.controller.inspect();
+        harness.resolveTarget(false);
+        harness.reopen();
+        harness.setCompletion(receipt);
+        harness.controller.inspect();
+
+        expect(harness.getProvider()!()).toBeNull();
+        expect(harness.client.ensureWebSocket).toHaveBeenCalledTimes(1);
+        expect(probe).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps the target grant across repeated inspection without a durable change', async () => {
+        const probe = vi.fn(async (_client, port) => ({
+            Id: port.binding.profileUserId, ServerId: serverId
+        }));
+        const harness = createHarness(probe);
+        harness.controller.register(harness.client);
+        await vi.waitFor(() => expect(harness.client.ensureWebSocket).toHaveBeenCalledOnce());
+        harness.mark();
+        harness.resolveTarget(false);
+        harness.reopen();
+        expect(harness.getProvider()!()).toBeNull();
+
+        harness.setCompletion(targetReceipt);
+        await vi.waitFor(() => expect(harness.client.ensureWebSocket).toHaveBeenCalledTimes(2));
+        const currentGuard = harness.getProvider()!();
+        harness.controller.inspect();
+        harness.controller.inspect();
+
+        expect(currentGuard?.isCurrent()).toBe(true);
+        expect(harness.getProvider()!()).toBe(currentGuard);
+        expect(harness.client.ensureWebSocket).toHaveBeenCalledTimes(2);
+        expect(probe).toHaveBeenCalledTimes(2);
+        expect(harness.client.closeWebSocket).toHaveBeenCalledTimes(1);
     });
 
     it('requires an explicit selector-disabled state for ordinary cold login', async () => {

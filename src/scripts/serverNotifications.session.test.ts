@@ -1,10 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { client, notify, play, queue, setVolume } = vi.hoisted(() => ({
+const { client, handleCommand, notify, play, queue, setVolume } = vi.hoisted(() => ({
     client: {
         getCurrentUserId: () => 'user-a',
         serverInfo: () => ({ Id: 'server-1' })
     },
+    handleCommand: vi.fn(),
     notify: vi.fn(),
     play: vi.fn(),
     queue: vi.fn(),
@@ -26,7 +27,7 @@ vi.mock('components/playback/playbackmanager', () => ({
 vi.mock('components/pluginManager', () => ({ pluginManager: { firstOfType: () => null } }));
 vi.mock('components/router/appRouter', () => ({ appRouter: { showItem: vi.fn() } }));
 vi.mock('components/toast/toast', () => ({ default: vi.fn() }));
-vi.mock('scripts/inputManager', () => ({ default: { notify, handleCommand: vi.fn() } }));
+vi.mock('scripts/inputManager', () => ({ default: { notify, handleCommand } }));
 
 import Events from 'utils/events';
 import serverNotifications from './serverNotifications';
@@ -37,6 +38,7 @@ function deliver(message: Record<string, unknown>, isCurrent: () => boolean) {
 
 describe('serverNotifications captured delivery', () => {
     beforeEach(() => {
+        handleCommand.mockReset();
         notify.mockReset();
         play.mockReset();
         queue.mockReset();
@@ -49,6 +51,20 @@ describe('serverNotifications captured delivery', () => {
         deliver({ MessageType: 'Play', Data: { ItemIds: ['movie-a'] } }, () => false);
         expect(notify).not.toHaveBeenCalled();
         expect(play).not.toHaveBeenCalled();
+    });
+
+    it('rejects A Playstate on the reused client while preserving B Playstate', () => {
+        let activeSession = 'A';
+        const fromA = () => activeSession === 'A';
+        const fromB = () => activeSession === 'B';
+        activeSession = 'B';
+
+        deliver({ MessageType: 'Playstate', Data: { Command: 'Pause' } }, fromA);
+        expect(handleCommand).not.toHaveBeenCalled();
+
+        deliver({ MessageType: 'Playstate', Data: { Command: 'Pause' } }, fromB);
+        expect(handleCommand).toHaveBeenCalledOnce();
+        expect(handleCommand).toHaveBeenCalledWith('pause');
     });
 
     it('rechecks authority after a synchronous notification side effect', () => {
