@@ -1,3 +1,4 @@
+import { BaseItemKind } from '@jellyfin/sdk/lib/generated-client/models/base-item-kind';
 import { ImageType } from '@jellyfin/sdk/lib/generated-client/models/image-type';
 import { ItemFields } from '@jellyfin/sdk/lib/generated-client/models/item-fields';
 import { MediaType } from '@jellyfin/sdk/lib/generated-client/models/media-type';
@@ -15,6 +16,7 @@ import { getWideDescriptor } from '../homeImageScope';
 import { queryClient } from 'utils/query/queryClient';
 import globalize from 'lib/globalize';
 import type { HomeSessionRead } from './homeSessionRead';
+import { SessionReadCancelledError } from 'utils/jellyfin-apiclient/sessionReadApi';
 import {
     aggregateHomeSectionResults,
     getHomeLoadState,
@@ -47,16 +49,22 @@ const RECENT_LIBRARY_EXCLUDES = new Set([
 
 const HOME_PAGE_WITHOUT_RESUME_HERO_CLASS = 'homePage--withoutResumeHero';
 const DASHBOARD_WITHOUT_RESUME_HERO_CLASS = 'tvHomeDashboard--withoutResumeHero';
+const dashboardOwners = new WeakMap<HTMLElement, AbortController>();
 
 type LibraryTone = 'red' | 'blue' | 'purple' | 'green' | 'orange' | 'gray';
 
 type LibraryViewModel = {
     item: BaseItemDto;
     name: string;
-    count?: number;
     icon: string;
     tone: LibraryTone;
     adult: boolean;
+};
+
+type LibraryCountTarget = {
+    libraryId: string;
+    itemKind: BaseItemKind;
+    chip: HTMLElement;
 };
 
 function getUserViews(session: HomeSessionRead): Promise<BaseItemDto[]> {
@@ -95,7 +103,6 @@ function getLibraryViewModel(item: BaseItemDto): LibraryViewModel {
         return {
             item,
             name,
-            count: item.ChildCount ?? undefined,
             icon: 'lock',
             tone: 'orange',
             adult: true
@@ -106,7 +113,6 @@ function getLibraryViewModel(item: BaseItemDto): LibraryViewModel {
         return {
             item,
             name,
-            count: item.ChildCount ?? undefined,
             icon: 'local_movies',
             tone: 'red',
             adult: false
@@ -117,7 +123,6 @@ function getLibraryViewModel(item: BaseItemDto): LibraryViewModel {
         return {
             item,
             name,
-            count: item.ChildCount ?? undefined,
             icon: 'live_tv',
             tone: 'blue',
             adult: false
@@ -128,7 +133,6 @@ function getLibraryViewModel(item: BaseItemDto): LibraryViewModel {
         return {
             item,
             name,
-            count: item.ChildCount ?? undefined,
             icon: 'collections',
             tone: 'green',
             adult: false
@@ -139,7 +143,6 @@ function getLibraryViewModel(item: BaseItemDto): LibraryViewModel {
         return {
             item,
             name,
-            count: item.ChildCount ?? undefined,
             icon: 'school',
             tone: 'purple',
             adult: false
@@ -149,7 +152,6 @@ function getLibraryViewModel(item: BaseItemDto): LibraryViewModel {
     return {
         item,
         name,
-        count: item.ChildCount ?? undefined,
         icon: 'folder',
         tone: 'gray',
         adult: false
@@ -328,10 +330,6 @@ function renderLibrariesSection(libraries: BaseItemDto[], user: UserDto): string
         html += '<span class="tvHomeLibraryChip__content">';
         html += '<span class="tvHomeLibraryChip__name">' + escapeHtml(library.name) + '</span>';
 
-        if (library.count != null) {
-            html += '<span class="tvHomeLibraryChip__count">' + library.count + '</span>';
-        }
-
         if (library.adult) {
             html += '<span class="tvHomeLibraryChip__badge">+18</span>';
         }
@@ -487,6 +485,56 @@ function getLatestItems(session: HomeSessionRead, libraries: BaseItemDto[]): Pro
         });
 }
 
+function getLibraryCountTargets(elem: HTMLElement, libraries: BaseItemDto[]): LibraryCountTarget[] {
+    const chips = elem.querySelectorAll<HTMLElement>('.tvHomeLibraryChip');
+    return getVisibleLibraries(libraries).flatMap((library, index) => {
+        const collectionType = (library.item.CollectionType || '').toLowerCase();
+        let itemKind: BaseItemKind | undefined;
+        if (collectionType === 'movies') itemKind = BaseItemKind.Movie;
+        if (collectionType === 'tvshows') itemKind = BaseItemKind.Series;
+        const libraryId = library.item.Id;
+        const chip = chips[index];
+        return libraryId && itemKind && chip ? [{ libraryId, itemKind, chip }] : [];
+    });
+}
+
+async function populateLibraryCounts(elem: HTMLElement, owner: AbortController, session: HomeSessionRead, libraries: BaseItemDto[]): Promise<void> {
+    const targets = getLibraryCountTargets(elem, libraries);
+    let nextIndex = 0;
+    const worker = async () => {
+        while (nextIndex < targets.length && dashboardOwners.get(elem) === owner && !owner.signal.aborted) {
+            const target = targets[nextIndex++];
+            if (!elem.contains(target.chip)) return;
+            try {
+                session.assertCurrent();
+                const result = await session.read.getItems({
+                    userId: session.read.identity.profileUserId,
+                    parentId: target.libraryId,
+                    recursive: true,
+                    includeItemTypes: [target.itemKind],
+                    limit: 1,
+                    enableTotalRecordCount: true,
+                    enableImages: false,
+                    enableUserData: false
+                }, owner.signal);
+                session.assertCurrent();
+                if (dashboardOwners.get(elem) !== owner || owner.signal.aborted || !elem.contains(target.chip)) return;
+                const count = result.TotalRecordCount;
+                if (typeof count === 'number' && Number.isSafeInteger(count) && count >= 0) {
+                    const badge = document.createElement('span');
+                    badge.className = 'tvHomeLibraryChip__count';
+                    badge.textContent = String(count);
+                    target.chip.querySelector('.tvHomeLibraryChip__content')?.append(badge);
+                }
+            } catch (error) {
+                if (error instanceof CancelledError) return;
+            }
+        }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(2, targets.length) }, worker));
+}
+
 function throwIfSessionCancelled(results: PromiseSettledResult<unknown>[]): void {
     const cancelled = results.find(result => result.status === 'rejected'
         && result.reason instanceof CancelledError);
@@ -495,6 +543,16 @@ function throwIfSessionCancelled(results: PromiseSettledResult<unknown>[]): void
 
 function getSettledItems(result: PromiseSettledResult<BaseItemDto[]>): BaseItemDto[] {
     return result.status === 'fulfilled' ? result.value : [];
+}
+
+function retireDashboardOwner(elem: HTMLElement): void {
+    const owner = dashboardOwners.get(elem);
+    dashboardOwners.delete(elem);
+    owner?.abort();
+}
+
+function assertDashboardOwner(elem: HTMLElement, owner: AbortController): void {
+    if (dashboardOwners.get(elem) !== owner || owner.signal.aborted) throw new SessionReadCancelledError();
 }
 
 function setWithoutResumeHeroState(elem: HTMLElement, enabled: boolean): void {
@@ -565,6 +623,7 @@ export function destroyTvHomeDashboard(elem: HTMLElement | null) {
         return;
     }
 
+    retireDashboardOwner(elem);
     elem.innerHTML = '';
     elem.classList.add('hide');
     setWithoutResumeHeroState(elem, false);
@@ -572,6 +631,7 @@ export function destroyTvHomeDashboard(elem: HTMLElement | null) {
 
 export function showUnavailableTvHomeDashboard(elem: HTMLElement | null) {
     if (!elem) return;
+    retireDashboardOwner(elem);
     elem.innerHTML = renderLoadState('error');
     elem.classList.remove('hide', 'is-loading');
 }
@@ -582,17 +642,22 @@ export function loadTvHomeDashboard(elem: HTMLElement | null, session: HomeSessi
     }
 
     session.assertCurrent();
+    retireDashboardOwner(elem);
+    const owner = new window['AbortController']();
+    dashboardOwners.set(elem, owner);
     elem.classList.add('is-loading');
 
     return getUserViews(session)
         .then(libraries => {
             session.assertCurrent();
+            assertDashboardOwner(elem, owner);
             return Promise.allSettled([
                 getResumeItems(session),
                 getNextUpItems(session),
                 getLatestItems(session, libraries)
             ]).then(([resumeItems, nextUpItems, latestItems]) => {
                 session.assertCurrent();
+                assertDashboardOwner(elem, owner);
                 throwIfSessionCancelled([ resumeItems, nextUpItems, latestItems ]);
                 const latestSection = latestItems.status === 'fulfilled' ? latestItems.value : {
                     items: [],
@@ -611,6 +676,7 @@ export function loadTvHomeDashboard(elem: HTMLElement | null, session: HomeSessi
         })
         .then(({ user, libraries, sectionStatuses, resumeItems, nextUpItems, latestItems }) => {
             session.assertCurrent();
+            assertDashboardOwner(elem, owner);
             const hasMedia = Boolean(resumeItems.length || nextUpItems.length || latestItems.length);
             const loadState = getHomeLoadState(Boolean(getVisibleLibraries(libraries).length), sectionStatuses, hasMedia);
             const images: HomeImageDescriptor[] = [];
@@ -636,15 +702,19 @@ export function loadTvHomeDashboard(elem: HTMLElement | null, session: HomeSessi
             elem.querySelector('.btnTvHomeManageLibraries')?.addEventListener('click', () => {
                 try {
                     session.assertCurrent();
+                    assertDashboardOwner(elem, owner);
                     void Dashboard.navigate('dashboard/libraries');
                 } catch (error) {
                     if (!(error instanceof CancelledError)) throw error;
                 }
             });
+
+            void populateLibraryCounts(elem, owner, session, libraries);
         })
         .catch(err => {
             if (err instanceof CancelledError) throw err;
             session.assertCurrent();
+            assertDashboardOwner(elem, owner);
             showUnavailableTvHomeDashboard(elem);
             console.error('Failed to load TV Home dashboard.');
         });
