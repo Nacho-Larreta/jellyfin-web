@@ -37,18 +37,21 @@ export const toStandardExploreItem = (item: BaseItemDto): ExploreItemDto => {
     };
 };
 
-export type SearchProfileContext = {
-    ownerUserId: string;
-    profileUserId: string;
+export type SearchDiscoveryContext = {
     userId: string;
     serverId: string;
+};
+
+export type SearchProfileContext = SearchDiscoveryContext & {
+    ownerUserId: string;
+    profileUserId: string;
 };
 
 type SearchDiscoveryApiClient = Pick<ApiClient, 'ajax' | 'getJSON' | 'getUrl'>;
 
 export type SearchDiscoveryFallback = {
-    fetchGenres: (context: SearchProfileContext, parentId?: string) => Promise<ExploreSectionDto>;
-    fetchCollections: (context: SearchProfileContext) => Promise<ExploreSectionDto>;
+    fetchGenres: (context: SearchDiscoveryContext, parentId?: string) => Promise<ExploreSectionDto>;
+    fetchCollections: (context: SearchDiscoveryContext) => Promise<ExploreSectionDto>;
 };
 
 const SEARCH_HISTORY_LIMIT = 8;
@@ -130,7 +133,7 @@ export const clearSearchHistory = async (
 
 export const fetchExploreGenres = async (
     apiClient: SearchDiscoveryApiClient,
-    context: SearchProfileContext,
+    context: SearchDiscoveryContext,
     fallback: SearchDiscoveryFallback,
     parentId?: string
 ): Promise<ExploreSectionDto> => {
@@ -153,7 +156,7 @@ export const fetchExploreGenres = async (
 
 export const fetchExploreCollections = async (
     apiClient: SearchDiscoveryApiClient,
-    context: SearchProfileContext,
+    context: SearchDiscoveryContext,
     fallback: SearchDiscoveryFallback
 ): Promise<ExploreSectionDto> => {
     try {
