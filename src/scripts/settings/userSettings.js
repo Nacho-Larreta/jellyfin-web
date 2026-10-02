@@ -48,27 +48,35 @@ const defaultComicsPlayerSettings = {
 };
 
 export class UserSettings {
+    userInfoGeneration = 0;
+
     /**
      * Bind UserSettings instance to user.
      * @param {string} - User identifier.
      * @param {Object} - ApiClient instance.
      */
-    setUserInfo(userId, apiClient) {
+    setUserInfo(userId, apiClient, assertCurrent = () => undefined) {
+        const generation = ++this.userInfoGeneration;
         if (this.saveTimeout) {
             clearTimeout(this.saveTimeout);
         }
 
         this.currentUserId = userId;
         this.currentApiClient = apiClient;
+        this.displayPrefs = null;
 
         if (!userId) {
-            this.displayPrefs = null;
             return Promise.resolve();
         }
 
         const self = this;
 
         return apiClient.getDisplayPreferences('usersettings', userId, 'emby').then(function (result) {
+            if (self.userInfoGeneration !== generation
+                || self.currentUserId !== userId || self.currentApiClient !== apiClient) {
+                return;
+            }
+            assertCurrent();
             result.CustomPrefs = result.CustomPrefs || {};
             self.displayPrefs = result;
         });

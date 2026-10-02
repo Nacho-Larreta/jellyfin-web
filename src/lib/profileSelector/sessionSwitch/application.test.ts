@@ -102,6 +102,62 @@ const enabledSecondarySelector = {
 };
 
 describe('WebSessionSwitchApplication bootstrap', () => {
+    it('stops a login bootstrap before its first envelope write when authority is revoked during selector fetch', async () => {
+        const apiClient = createApiClient(enabledOwnerSelector);
+        let resolveSelector!: (value: typeof enabledOwnerSelector) => void;
+        apiClient.getJSON.mockReturnValue(new Promise(done => {
+            resolveSelector = done;
+        }));
+        const connections = createConnections(null, apiClient);
+        const application = new WebSessionSwitchApplication(connections);
+        let current = true;
+        const authority = {
+            assertCurrent: () => {
+                if (!current) throw new ConcurrentSessionWriteError(0);
+            },
+            acceptSessionWrite: vi.fn()
+        };
+
+        const bootstrap = application.bootstrapAuthenticatedSession(apiClient, {
+            Id: 'owner-user', ServerId: 'server-1'
+        }, authority);
+        current = false;
+        resolveSelector(enabledOwnerSelector);
+
+        await expect(bootstrap).rejects.toBeInstanceOf(ConcurrentSessionWriteError);
+        expect(connections.replaceSessionSwitchEnvelope).not.toHaveBeenCalled();
+        expect(connections.installSessionAuthentication).not.toHaveBeenCalled();
+    });
+
+    it('discards a staged login when authority is revoked during identity verification', async () => {
+        const apiClient = createApiClient(enabledSecondarySelector, 'secondary-user', 'secondary-token');
+        const connections = createConnections(null, apiClient);
+        let resolveUser!: (value: { Id: string; ServerId: string }) => void;
+        connections.getInstalledSessionUser.mockReturnValue(new Promise(done => {
+            resolveUser = done;
+        }));
+        const application = new WebSessionSwitchApplication(connections);
+        let current = true;
+        const authority = {
+            assertCurrent: () => {
+                if (!current) throw new ConcurrentSessionWriteError(1);
+            },
+            acceptSessionWrite: vi.fn()
+        };
+
+        const bootstrap = application.bootstrapAuthenticatedSession(apiClient, {
+            Id: 'secondary-user', ServerId: 'server-1'
+        }, authority);
+        await vi.waitFor(() => expect(connections.getInstalledSessionUser).toHaveBeenCalledOnce());
+        current = false;
+        resolveUser({ Id: 'secondary-user', ServerId: 'server-1' });
+
+        await expect(bootstrap).rejects.toBeInstanceOf(ConcurrentSessionWriteError);
+        expect(authority.acceptSessionWrite).toHaveBeenCalledOnce();
+        expect(connections.reconnectInstalledSession).not.toHaveBeenCalled();
+        expect(connections.discardStagedSession).toHaveBeenCalled();
+    });
+
     it('creates the first atomic owner envelope before binding runtime', async () => {
         const apiClient = createApiClient(enabledOwnerSelector);
         const connections = createConnections(null, apiClient);

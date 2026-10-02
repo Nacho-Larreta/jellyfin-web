@@ -65,8 +65,8 @@ export class ServerConnectionsSessionRuntime implements SessionRuntimePort {
         this.connections.resetInstalledSession(session.serverId);
     }
 
-    reconnectAndVerify(session: ActiveProfileSession): Promise<boolean> {
-        return this.verifyAndReconnect(session);
+    reconnectAndVerify(session: ActiveProfileSession, assertCurrent?: () => void): Promise<boolean> {
+        return this.verifyAndReconnect(session, assertCurrent);
     }
 
     async clearActiveSession(session: ActiveProfileSession): Promise<void> {
@@ -84,13 +84,19 @@ export class ServerConnectionsSessionRuntime implements SessionRuntimePort {
         await this.connections.publishSessionSwitchCompletion(user, receipt);
     }
 
-    private async verifyAndReconnect(session: ActiveProfileSession): Promise<boolean> {
+    private async verifyAndReconnect(session: ActiveProfileSession, assertCurrent?: () => void): Promise<boolean> {
         let user: JellyfinUser;
         try {
             user = await this.connections.getInstalledSessionUser(session.serverId);
         } catch {
             this.clearVerification(session.serverId);
             return false;
+        }
+        try {
+            assertCurrent?.();
+        } catch (error) {
+            this.invalidate(session.serverId);
+            throw error;
         }
 
         if (!user || user.Id !== session.profileUserId) {
@@ -100,6 +106,12 @@ export class ServerConnectionsSessionRuntime implements SessionRuntimePort {
 
         this.verifiedUsers.set(session.serverId, user);
         this.verifiedSessions.set(session.serverId, session);
+        try {
+            assertCurrent?.();
+        } catch (error) {
+            this.invalidate(session.serverId);
+            throw error;
+        }
         this.connections.reconnectInstalledSession(session.serverId);
         return true;
     }

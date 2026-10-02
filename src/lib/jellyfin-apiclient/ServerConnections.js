@@ -11,6 +11,7 @@ import {
     CORRUPT_SESSION_STORAGE,
     ConcurrentSessionWriteError,
     SessionStorageCorruptionError,
+    SessionSwitchRecoveryRequiredError,
     SessionSwitchUnsupportedEngineError,
     assertSessionEnvelope,
     createOwnerRecoverySession
@@ -114,6 +115,7 @@ export class ServerConnections extends ConnectionManager {
         this.sessionDeviceId = arguments[4];
         this.sessionEnvelopeListeners = new Map();
         this.stagedSessionBindings = new Map();
+        this.loginPublicationQueues = new Map();
         this.localApiClient = null;
         this.firstConnection = null;
         this.mutateCredentials = mutation => this.mutateCredentialsWithAuthority(mutation);
@@ -563,6 +565,107 @@ export class ServerConnections extends ConnectionManager {
         return readSessionAuthorityRevision(server);
     }
 
+    captureLoginAuthority(serverId) {
+        const server = this.readFreshCredentials().Servers.find(candidate => candidate.Id === serverId);
+        if (!server) {
+            throw new Error('[ServerConnection] Login server is unavailable');
+        }
+        if (server.SessionSwitchEnvelope) {
+            assertSessionEnvelope(server.SessionSwitchEnvelope);
+        }
+        if (server.SessionSwitchEnvelope?.marker) {
+            throw new SessionSwitchRecoveryRequiredError(server.SessionSwitchEnvelope.marker.switchId);
+        }
+        return this.getSessionAuthorityRevision(server);
+    }
+
+    publishLoginAuthentication(apiClient, result, attempt) {
+        const serverId = apiClient.serverId();
+        const queueKey = `${serverId}:${this.sessionDeviceId}`;
+        const previous = this.loginPublicationQueues.get(queueKey) || Promise.resolve();
+        const current = previous.catch(() => undefined).then(() => (
+            this.commitLoginAuthentication(apiClient, result, attempt)
+        ));
+        this.loginPublicationQueues.set(queueKey, current);
+        void current.finally(() => {
+            if (this.loginPublicationQueues.get(queueKey) === current) {
+                this.loginPublicationQueues.delete(queueKey);
+            }
+        }).catch(() => undefined);
+        return current;
+    }
+
+    async commitLoginAuthentication(apiClient, result, attempt) {
+        const serverId = apiClient.serverId();
+        if (!serverId || typeof result?.AccessToken !== 'string' || !result.AccessToken
+            || typeof result?.User?.Id !== 'string' || !result.User.Id
+            || result.ServerId !== serverId
+            || !Number.isSafeInteger(attempt?.expectedAuthorityRevision)
+            || attempt.expectedAuthorityRevision < 0
+            || typeof attempt.isCurrent !== 'function') {
+            throw new TypeError('[ServerConnection] Invalid login authentication result');
+        }
+
+        const authority = {
+            serverId,
+            userId: result.User.Id,
+            token: result.AccessToken,
+            revision: attempt.expectedAuthorityRevision
+        };
+        const assertCurrent = () => {
+            const server = this.readFreshCredentials().Servers.find(candidate => candidate.Id === serverId);
+            if (!server || this.getSessionAuthorityRevision(server) !== authority.revision
+                || server.UserId !== authority.userId || server.AccessToken !== authority.token
+                || server.SessionSwitchEnvelope?.marker) {
+                throw new ConcurrentSessionWriteError(server?.SessionSwitchEnvelope?.revision ?? 0);
+            }
+        };
+        const acceptSessionWrite = () => {
+            authority.revision += 1;
+            assertCurrent();
+        };
+
+        await this.withSessionEnvelopeLock(serverId, () => {
+            if (!attempt.isCurrent()) {
+                throw new ConcurrentSessionWriteError(authority.revision);
+            }
+            const previousCredentials = this.readFreshCredentials();
+            const nextCredentials = JSON.parse(JSON.stringify(previousCredentials));
+            const server = nextCredentials.Servers.find(candidate => candidate.Id === serverId);
+            if (!server || this.getSessionAuthorityRevision(server) !== authority.revision) {
+                throw new ConcurrentSessionWriteError(server?.SessionSwitchEnvelope?.revision ?? 0);
+            }
+            if (server.SessionSwitchEnvelope) {
+                assertSessionEnvelope(server.SessionSwitchEnvelope);
+            }
+            if (server.SessionSwitchEnvelope?.marker) {
+                throw new SessionSwitchRecoveryRequiredError(server.SessionSwitchEnvelope.marker.switchId);
+            }
+
+            revokeSavedSessionAuthority(server);
+            server.UserId = authority.userId;
+            server.AccessToken = authority.token;
+            server.DateLastAccessed = Date.now();
+            this.advanceSessionAuthorityRevision(server);
+            this.persistCredentials(previousCredentials, nextCredentials);
+            this.notifySessionSwitchEnvelope(serverId, null);
+            authority.revision += 1;
+        });
+
+        assertCurrent();
+        const savedServer = this.readFreshCredentials().Servers.find(candidate => candidate.Id === serverId);
+        const activeApiClient = this.installAuthenticationBinding(savedServer, authority.token, authority.userId);
+        assertCurrent();
+        const user = { ...result.User, ServerId: serverId };
+        await this.bootstrapAuthenticatedUser(user, { assertCurrent, acceptSessionWrite });
+        assertCurrent();
+        activeApiClient.ensureWebSocket();
+        await this.publishLocalUserState(user, assertCurrent);
+        assertCurrent();
+        Events.trigger(this, 'localusersignedin', [user]);
+        return activeApiClient;
+    }
+
     advanceSessionAuthorityRevision(server) {
         const revision = this.getSessionAuthorityRevision(server);
         if (revision === Number.MAX_SAFE_INTEGER) {
@@ -750,23 +853,26 @@ export class ServerConnections extends ConnectionManager {
         return this.publishLocalUserState(user);
     }
 
-    bootstrapAuthenticatedUser(user) {
+    bootstrapAuthenticatedUser(user, authority) {
         const apiClient = this.getApiClient(user.ServerId);
         if (!apiClient) {
             return Promise.reject(new Error(`[ServerConnection] ApiClient not found: ${user.ServerId}`));
         }
 
         return import('../profileSelector/sessionSwitch/application').then(({ getWebSessionSwitchApplication }) => {
-            return getWebSessionSwitchApplication(this).bootstrapAuthenticatedSession(apiClient, user);
+            return getWebSessionSwitchApplication(this).bootstrapAuthenticatedSession(apiClient, user, authority);
         });
     }
 
-    publishLocalUserState(user) {
+    publishLocalUserState(user, assertCurrent = () => undefined) {
+        assertCurrent();
         const apiClient = this.getApiClient(user.ServerId);
         this.setLocalApiClient(apiClient);
-        return setUserInfo(user.Id, apiClient).then(() => {
+        return setUserInfo(user.Id, apiClient, assertCurrent).then(() => {
+            assertCurrent();
             if (window.NativeShell && typeof window.NativeShell.onLocalUserSignedIn === 'function') {
-                return window.NativeShell.onLocalUserSignedIn(user, apiClient.accessToken());
+                return Promise.resolve(window.NativeShell.onLocalUserSignedIn(user, apiClient.accessToken()))
+                    .then(() => assertCurrent());
             }
             return Promise.resolve();
         });

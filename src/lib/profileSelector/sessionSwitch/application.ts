@@ -29,6 +29,11 @@ interface AuthenticatedUser {
     readonly ServerId?: string | null;
 }
 
+interface LoginBootstrapAuthority {
+    assertCurrent(): void;
+    acceptSessionWrite(): void;
+}
+
 interface ProfileSelectorState {
     readonly IsEnabled: boolean;
     readonly IsCurrentUserOwner: boolean;
@@ -113,12 +118,16 @@ export class WebSessionSwitchApplication {
 
     async bootstrapAuthenticatedSession(
         apiClient: ProfileSwitchApiClient,
-        authenticatedUser?: AuthenticatedUser
+        authenticatedUser?: AuthenticatedUser,
+        authority?: LoginBootstrapAuthority
     ): Promise<ProfileSessionBootstrapResult> {
         const user = authenticatedUser ?? await apiClient.getCurrentUser();
+        authority?.assertCurrent();
         assertAuthenticatedBinding(apiClient, user);
         const selector = await getCurrentProfileSelector(apiClient) as ProfileSelectorState | null;
-        const activeSession = await this.reconcile(apiClient, user, selector);
+        authority?.assertCurrent();
+        const activeSession = await this.reconcile(apiClient, user, selector, authority);
+        authority?.assertCurrent();
         return { selector, activeSession };
     }
 
@@ -129,37 +138,55 @@ export class WebSessionSwitchApplication {
     private async reconcile(
         apiClient: ProfileSwitchApiClient,
         user: AuthenticatedUser,
-        selector: ProfileSelectorState | null
+        selector: ProfileSelectorState | null,
+        authority?: LoginBootstrapAuthority
     ): Promise<ActiveProfileSession | null> {
         let currentUser = user;
         const serverId = apiClient.serverId();
         const scope = this.createScope(serverId);
         const context = this.getContext(scope);
         const stored = await context.store.load(scope);
+        authority?.assertCurrent();
 
         if (!selector?.IsEnabled) {
+            authority?.assertCurrent();
             await this.disableSelector(context, scope, stored, apiClient, currentUser);
+            authority?.assertCurrent();
             return null;
         }
 
         await this.connections.setProfileSelectorAvailability(serverId, true);
+        authority?.assertCurrent();
         let envelope = stored;
         if (envelope === null) {
-            envelope = await this.initializeEnvelope(context.store, scope, apiClient, currentUser, selector);
+            envelope = await this.initializeEnvelope(context.store, scope, apiClient, currentUser, selector, authority);
+            authority?.assertCurrent();
         }
         if (envelope.marker !== null) {
+            if (authority) {
+                throw new SessionSwitchRecoveryRequiredError(envelope.marker.switchId);
+            }
             await context.coordinator.recover();
             envelope = await this.loadRequired(context.store, scope);
             currentUser = await apiClient.getCurrentUser();
         }
 
         assertRuntimeAuthentication(envelope, apiClient, currentUser);
-        envelope = await this.establishExplicitOwnerRecovery(context.store, scope, envelope, apiClient, selector);
+        envelope = await this.establishExplicitOwnerRecovery(context.store, scope, envelope, apiClient, selector, authority);
+        authority?.assertCurrent();
 
         if (!context.runtime.isVerifiedSession(envelope.activeSession)) {
-            await context.runtime.installActiveSession(envelope.activeSession);
-            if (!await context.runtime.reconnectAndVerify(envelope.activeSession)) {
-                throw new SessionSwitchRecoveryRequiredError(envelope.marker?.switchId ?? 'identity-probe');
+            try {
+                authority?.assertCurrent();
+                await context.runtime.installActiveSession(envelope.activeSession);
+                authority?.assertCurrent();
+                if (!await context.runtime.reconnectAndVerify(envelope.activeSession, authority?.assertCurrent)) {
+                    throw new SessionSwitchRecoveryRequiredError(envelope.marker?.switchId ?? 'identity-probe');
+                }
+                authority?.assertCurrent();
+            } catch (error) {
+                context.runtime.invalidate(serverId);
+                throw error;
             }
         }
         return envelope.activeSession;
@@ -233,7 +260,8 @@ export class WebSessionSwitchApplication {
         scope: SessionScope,
         apiClient: ProfileSwitchApiClient,
         user: AuthenticatedUser,
-        selector: ProfileSelectorState
+        selector: ProfileSelectorState,
+        authority?: LoginBootstrapAuthority
     ): Promise<SessionSwitchEnvelope> {
         const token = requireAccessToken(apiClient);
         const activeSession = createActiveProfileSession(
@@ -250,8 +278,11 @@ export class WebSessionSwitchApplication {
         const initial = createSessionSwitchEnvelope(activeSession, recoverySession);
 
         try {
-            return await store.compareAndSwap(scope, 0, { ...initial, revision: 1 });
+            const committed = await store.compareAndSwap(scope, 0, { ...initial, revision: 1 });
+            authority?.acceptSessionWrite();
+            return committed;
         } catch (error) {
+            authority?.assertCurrent();
             if (!(error instanceof ConcurrentSessionWriteError)) {
                 throw error;
             }
@@ -268,7 +299,8 @@ export class WebSessionSwitchApplication {
         scope: SessionScope,
         envelope: SessionSwitchEnvelope,
         apiClient: ProfileSwitchApiClient,
-        selector: ProfileSelectorState
+        selector: ProfileSelectorState,
+        authority?: LoginBootstrapAuthority
     ): Promise<SessionSwitchEnvelope> {
         if (!selector.IsCurrentUserOwner
             || selector.OwnerUserId !== envelope.activeSession.profileUserId
@@ -282,11 +314,13 @@ export class WebSessionSwitchApplication {
             selector.OwnerUserId,
             requireAccessToken(apiClient)
         );
-        return store.compareAndSwap(scope, envelope.revision, {
+        const committed = await store.compareAndSwap(scope, envelope.revision, {
             ...envelope,
             revision: envelope.revision + 1,
             recoverySession
         });
+        authority?.acceptSessionWrite();
+        return committed;
     }
 
     private getContext(scope: SessionScope): SessionContext {

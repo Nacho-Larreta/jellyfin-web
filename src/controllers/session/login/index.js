@@ -17,26 +17,66 @@ import '../../../elements/emby-checkbox/emby-checkbox';
 import Dashboard from '../../../utils/dashboard';
 import toast from '../../../components/toast/toast';
 import dialogHelper from '../../../components/dialogHelper/dialogHelper';
-import baseAlert from '../../../components/alert';
+import dialog from '../../../components/dialog/dialog';
+import { appRouter } from '../../../components/router/appRouter';
 import { resolveProfileSelectorRoute } from '../../../lib/profileSelector/navigation';
 import { getDefaultBackgroundClass } from '../../../components/cardbuilder/utils/builder';
+import { SessionSwitchRecoveryRequiredError } from '../../../lib/profileSelector/sessionSwitch/model';
+import {
+    readQuickConnectState,
+    requestManualAuthentication,
+    requestQuickConnectAuthentication
+} from './authenticationRequests';
 
 import './login.scss';
 
 const enableFocusTransform = !browser.slow && !browser.edge;
 
-function authenticateUserByName(page, apiClient, url, username, password) {
-    loading.show();
-    apiClient.authenticateUserByName(username, password).then(function () {
-        loading.hide();
+const QUICK_CONNECT_DIAGNOSTICS = Object.freeze({
+    initiateFailed: 'initiate-failed',
+    initiateMalformed: 'initiate-malformed',
+    pollOrConnectFailed: 'poll-or-connect-failed'
+});
+let nextQuickConnectDialogId = 0;
 
-        onLoginSuccessful(apiClient, url);
-    }, function (response) {
+function reportQuickConnectDiagnostic(code) {
+    console.error('[LoginPage][quick-connect]', code);
+}
+
+function closeQuickConnectDialog(dialogId) {
+    const dialogElement = document.getElementById(dialogId);
+    if (dialogElement) {
+        dialogHelper.close(dialogElement);
+    }
+}
+
+function routeToSessionRecovery(error) {
+    if (!(error instanceof SessionSwitchRecoveryRequiredError)) return false;
+    Dashboard.navigate('/home');
+    return true;
+}
+
+async function authenticateUserByName(page, apiClient, url, username, password, isCurrent) {
+    loading.show();
+    try {
+        const expectedAuthorityRevision = ServerConnections.captureLoginAuthority(apiClient.serverId());
+        const result = await requestManualAuthentication(apiClient, username, password);
+        if (!isCurrent()) return;
+        await ServerConnections.publishLoginAuthentication(apiClient, result, {
+            expectedAuthorityRevision,
+            isCurrent
+        });
+        if (!isCurrent()) return;
+        loading.hide();
+        await onLoginSuccessful(apiClient, url, () => !isCurrent());
+    } catch (response) {
+        if (!isCurrent()) return;
         page.querySelector('#txtManualPassword').value = '';
         loading.hide();
+        if (routeToSessionRecovery(response)) return;
 
         const UnauthorizedOrForbidden = [401, 403];
-        if (UnauthorizedOrForbidden.includes(response.status)) {
+        if (UnauthorizedOrForbidden.includes(response?.status)) {
             const messageKey = response.status === 401 ? 'MessageInvalidUser' : 'MessageUnauthorizedUser';
             toast(globalize.translate(messageKey));
         } else {
@@ -45,79 +85,163 @@ function authenticateUserByName(page, apiClient, url, username, password) {
                 title: globalize.translate('HeaderConnectionFailure')
             });
         }
-    });
+    }
 }
 
-function authenticateQuickConnect(apiClient, targetUrl) {
-    const url = apiClient.getUrl('/QuickConnect/Initiate');
-    apiClient.ajax({ type: 'POST', url }, true).then(res => res.json()).then(function (json) {
-        if (!json.Secret || !json.Code) {
-            console.error('Malformed quick connect response', json);
+function createQuickConnectSession(apiClient, targetUrl, isAttemptCurrent) {
+    let cancelled = false;
+    let completing = false;
+    let pollTimer = null;
+    const dialogId = `quickConnectAlert-${++nextQuickConnectDialogId}`;
+    const errorDialogId = `${dialogId}-error`;
+    let errorDialogOwner = null;
+    const isCurrent = () => !cancelled && isAttemptCurrent();
+
+    const clearPollTimer = () => {
+        if (pollTimer !== null) {
+            clearTimeout(pollTimer);
+            pollTimer = null;
+        }
+    };
+    const finish = closeDialog => {
+        cancelled = true;
+        clearPollTimer();
+        if (closeDialog) closeQuickConnectDialog(dialogId);
+    };
+    const cancel = () => {
+        errorDialogOwner = null;
+        if (!cancelled) finish(true);
+        closeQuickConnectDialog(errorDialogId);
+    };
+    const showErrorDialog = async messageKey => {
+        const owner = {};
+        errorDialogOwner = owner;
+        try {
+            await appRouter.ready();
+            if (errorDialogOwner !== owner || !isAttemptCurrent()) return;
+            const result = dialog.show({
+                dialogOptions: { id: errorDialogId },
+                title: globalize.translate('HeaderError'),
+                text: globalize.translate(messageKey),
+                buttons: [{
+                    name: globalize.translate('ButtonGotIt'),
+                    id: 'ok',
+                    type: 'submit'
+                }]
+            });
+            const onSettled = () => {
+                if (errorDialogOwner === owner) errorDialogOwner = null;
+            };
+            void Promise.resolve(result).then(onSettled, onSettled);
+        } catch {
+            if (errorDialogOwner === owner) errorDialogOwner = null;
+        }
+    };
+    const schedulePoll = secret => {
+        if (cancelled) return;
+        pollTimer = setTimeout(() => {
+            pollTimer = null;
+            void poll(secret);
+        }, 5000);
+    };
+    const poll = async secret => {
+        try {
+            const data = await readQuickConnectState(apiClient, secret);
+            if (!isCurrent()) return;
+            if (!data.Authenticated) {
+                schedulePoll(secret);
+                return;
+            }
+
+            const result = await requestQuickConnectAuthentication(apiClient, data.Secret);
+            if (!isCurrent()) return;
+            await ServerConnections.publishLoginAuthentication(apiClient, result, {
+                expectedAuthorityRevision,
+                isCurrent
+            });
+            if (!isCurrent()) return;
+            completing = true;
+            closeQuickConnectDialog(dialogId);
+            await onLoginSuccessful(apiClient, targetUrl, () => !isCurrent());
+            if (!cancelled) finish(false);
+        } catch (error) {
+            if (!isCurrent()) return;
+            finish(true);
+            if (routeToSessionRecovery(error)) return;
+            void showErrorDialog('QuickConnectDeactivated');
+            reportQuickConnectDiagnostic(QUICK_CONNECT_DIAGNOSTICS.pollOrConnectFailed);
+        }
+    };
+    let expectedAuthorityRevision;
+    const start = async () => {
+        try {
+            expectedAuthorityRevision = ServerConnections.captureLoginAuthority(apiClient.serverId());
+            const initiateUrl = apiClient.getUrl('/QuickConnect/Initiate');
+            const response = await apiClient.ajax({ type: 'POST', url: initiateUrl }, true);
+            const json = await response.json();
+            if (!isCurrent()) return false;
+            if (typeof json?.Secret !== 'string' || !json.Secret
+                || typeof json.Code !== 'string' || !json.Code) {
+                reportQuickConnectDiagnostic(QUICK_CONNECT_DIAGNOSTICS.initiateMalformed);
+                finish(false);
+                return false;
+            }
+
+            await appRouter.ready();
+            if (!isCurrent()) return false;
+            const dialogResult = dialog.show({
+                dialogOptions: {
+                    id: dialogId
+                },
+                title: globalize.translate('QuickConnect'),
+                text: globalize.translate('QuickConnectAuthorizeCode', json.Code),
+                buttons: [{
+                    name: globalize.translate('ButtonGotIt'),
+                    id: 'ok',
+                    type: 'submit'
+                }]
+            });
+            const onDialogSettled = () => {
+                if (!completing && !cancelled) cancel();
+            };
+            void Promise.resolve(dialogResult).then(onDialogSettled, onDialogSettled);
+            const dialogElement = document.getElementById(dialogId);
+            dialogElement.addEventListener('closing', () => {
+                if (!completing && !cancelled) finish(false);
+            }, { once: true });
+            schedulePoll(json.Secret);
+            return isCurrent();
+        } catch (error) {
+            if (!isCurrent()) return false;
+            finish(true);
+            if (routeToSessionRecovery(error)) return false;
+            void showErrorDialog('QuickConnectNotActive');
+            reportQuickConnectDiagnostic(QUICK_CONNECT_DIAGNOSTICS.initiateFailed);
             return false;
         }
+    };
 
-        baseAlert({
-            dialogOptions: {
-                id: 'quickConnectAlert'
-            },
-            title: globalize.translate('QuickConnect'),
-            text: globalize.translate('QuickConnectAuthorizeCode', json.Code)
-        });
-
-        const connectUrl = apiClient.getUrl('/QuickConnect/Connect?Secret=' + json.Secret);
-
-        const interval = setInterval(function() {
-            apiClient.getJSON(connectUrl).then(async function(data) {
-                if (!data.Authenticated) {
-                    return;
-                }
-
-                clearInterval(interval);
-
-                // Close the QuickConnect dialog
-                const dlg = document.getElementById('quickConnectAlert');
-                if (dlg) {
-                    dialogHelper.close(dlg);
-                }
-
-                await apiClient.quickConnect(data.Secret);
-                onLoginSuccessful(apiClient, targetUrl);
-            }, function (e) {
-                clearInterval(interval);
-
-                // Close the QuickConnect dialog
-                const dlg = document.getElementById('quickConnectAlert');
-                if (dlg) {
-                    dialogHelper.close(dlg);
-                }
-
-                Dashboard.alert({
-                    message: globalize.translate('QuickConnectDeactivated'),
-                    title: globalize.translate('HeaderError')
-                });
-
-                console.error('Unable to login with quick connect', e);
-            });
-        }, 5000, connectUrl);
-
-        return true;
-    }, function(e) {
-        Dashboard.alert({
-            message: globalize.translate('QuickConnectNotActive'),
-            title: globalize.translate('HeaderError')
-        });
-
-        console.error('Quick connect error: ', e);
-        return false;
-    });
+    return { cancel, start };
 }
 
-function onLoginSuccessful(apiClient, url) {
-    resolveProfileSelectorRoute(apiClient, url || '/home').then(targetUrl => {
+export function authenticateQuickConnect(apiClient, targetUrl, isAttemptCurrent = () => true) {
+    const session = createQuickConnectSession(apiClient, targetUrl, isAttemptCurrent);
+    const started = session.start().catch(() => {
+        session.cancel();
+        reportQuickConnectDiagnostic(QUICK_CONNECT_DIAGNOSTICS.initiateFailed);
+        return false;
+    });
+    return { ...session, started };
+}
+
+function onLoginSuccessful(apiClient, url, isCancelled = () => false) {
+    return resolveProfileSelectorRoute(apiClient, url || '/home').then(targetUrl => {
+        if (isCancelled()) return;
         const activeApiClient = ServerConnections.currentApiClient() || apiClient;
         Dashboard.onServerChanged(activeApiClient.getCurrentUserId(), activeApiClient.accessToken(), activeApiClient);
         Dashboard.navigate(targetUrl);
     }).catch(() => {
+        if (isCancelled()) return;
         console.warn('[LoginPage] unable to resolve profile selector route');
         loading.show();
     });
@@ -192,6 +316,25 @@ function loadUserList(context, apiClient, users) {
 }
 
 export default function (view, params) {
+    let quickConnectSession = null;
+    let loginAttemptGeneration = 0;
+
+    function cancelQuickConnectSession() {
+        quickConnectSession?.cancel();
+        quickConnectSession = null;
+    }
+
+    function cancelLoginAttempt() {
+        loginAttemptGeneration += 1;
+        cancelQuickConnectSession();
+    }
+
+    function beginLoginAttempt() {
+        cancelLoginAttempt();
+        const generation = loginAttemptGeneration;
+        return () => generation === loginAttemptGeneration;
+    }
+
     function getApiClient() {
         const serverId = params.serverid;
 
@@ -206,8 +349,8 @@ export default function (view, params) {
         if (params.url) {
             try {
                 return decodeURIComponent(params.url);
-            } catch (err) {
-                console.warn('[LoginPage] unable to decode url param', params.url, err);
+            } catch {
+                console.warn('[LoginPage][navigation]', 'target-url-invalid');
             }
         }
 
@@ -235,11 +378,14 @@ export default function (view, params) {
             const haspw = cardContent.getAttribute('data-haspw');
 
             if (id === 'manual') {
+                cancelLoginAttempt();
                 context.querySelector('#txtManualName').value = '';
                 showManualForm(context, true);
             } else if (haspw == 'false') {
-                authenticateUserByName(context, getApiClient(), getTargetUrl(), name, '');
+                const isCurrent = beginLoginAttempt();
+                void authenticateUserByName(context, getApiClient(), getTargetUrl(), name, '', isCurrent);
             } else {
+                cancelLoginAttempt();
                 context.querySelector('#txtManualName').value = name;
                 context.querySelector('#txtManualPassword').value = '';
                 showManualForm(context, true, true);
@@ -247,24 +393,32 @@ export default function (view, params) {
         }
     });
     view.querySelector('.manualLoginForm').addEventListener('submit', function (e) {
+        const isCurrent = beginLoginAttempt();
         appSettings.enableAutoLogin(view.querySelector('.chkRememberLogin').checked);
-        authenticateUserByName(view, getApiClient(), getTargetUrl(), view.querySelector('#txtManualName').value, view.querySelector('#txtManualPassword').value);
+        void authenticateUserByName(view, getApiClient(), getTargetUrl(), view.querySelector('#txtManualName').value, view.querySelector('#txtManualPassword').value, isCurrent);
         e.preventDefault();
         return false;
     });
     view.querySelector('.btnForgotPassword').addEventListener('click', function () {
+        cancelLoginAttempt();
         Dashboard.navigate('forgotpassword');
     });
-    view.querySelector('.btnCancel').addEventListener('click', showVisualForm);
+    view.querySelector('.btnCancel').addEventListener('click', function () {
+        cancelLoginAttempt();
+        showVisualForm();
+    });
     view.querySelector('.btnQuick').addEventListener('click', function () {
-        authenticateQuickConnect(getApiClient(), getTargetUrl());
+        const isCurrent = beginLoginAttempt();
+        quickConnectSession = authenticateQuickConnect(getApiClient(), getTargetUrl(), isCurrent);
         return false;
     });
     view.querySelector('.btnManual').addEventListener('click', function () {
+        cancelLoginAttempt();
         view.querySelector('#txtManualName').value = '';
         showManualForm(view, true);
     });
     view.querySelector('.btnSelectServer').addEventListener('click', function () {
+        cancelLoginAttempt();
         Dashboard.selectServer();
     });
 
@@ -319,6 +473,7 @@ export default function (view, params) {
         });
     });
     view.addEventListener('viewhide', function () {
+        cancelLoginAttempt();
         libraryMenu.setTransparentMenu(false);
     });
 }

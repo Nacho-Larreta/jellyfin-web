@@ -212,6 +212,181 @@ function createConnections(provider, lockManager = createLockManager()) {
 }
 
 describe('ServerConnections session envelope adapter', () => {
+    function arrangeLoginPublication(provider = createProvider(), lockManager) {
+        const connections = createConnections(provider, lockManager);
+        const apiClient = { serverId: () => 'server-1' };
+        const activeApiClient = { ensureWebSocket: vi.fn() };
+        connections.installAuthenticationBinding = vi.fn(() => activeApiClient);
+        connections.bootstrapAuthenticatedUser = vi.fn().mockResolvedValue(undefined);
+        connections.publishLocalUserState = vi.fn().mockResolvedValue(undefined);
+        const result = {
+            ServerId: 'server-1',
+            AccessToken: 'new-token',
+            User: { Id: 'new-user' }
+        };
+        return { connections, apiClient, activeApiClient, provider, result };
+    }
+
+    it('commits a validated login under the credential lock before publishing sign-in', async () => {
+        const { connections, apiClient, activeApiClient, provider, result } = arrangeLoginPublication();
+        const signedIn = vi.fn();
+        Events.on(connections, 'localusersignedin', signedIn);
+        const expectedAuthorityRevision = connections.captureLoginAuthority('server-1');
+
+        await connections.publishLoginAuthentication(apiClient, result, {
+            expectedAuthorityRevision,
+            isCurrent: () => true
+        });
+
+        expect(provider.state().Servers[0]).toEqual(expect.objectContaining({
+            UserId: 'new-user',
+            AccessToken: 'new-token',
+            SessionSwitchEnvelope: null,
+            SessionSwitchAuthorityRevision: expectedAuthorityRevision + 1
+        }));
+        expect(connections.bootstrapAuthenticatedUser.mock.invocationCallOrder[0])
+            .toBeLessThan(connections.publishLocalUserState.mock.invocationCallOrder[0]);
+        expect(activeApiClient.ensureWebSocket).toHaveBeenCalledOnce();
+        expect(signedIn).toHaveBeenCalledOnce();
+    });
+
+    it('keeps a cancelled authentication result outside a paused credential sink', async () => {
+        const lockManager = createLockManager();
+        const entered = createDeferred();
+        const release = createDeferred();
+        const held = lockManager.request('test-credentials:credentials', { mode: 'exclusive' }, () => {
+            entered.resolve();
+            return release.promise;
+        });
+        await entered.promise;
+        const { connections, apiClient, provider, result } = arrangeLoginPublication(createProvider(), lockManager);
+        const expectedAuthorityRevision = connections.captureLoginAuthority('server-1');
+        let current = true;
+        const publication = connections.publishLoginAuthentication(apiClient, result, {
+            expectedAuthorityRevision,
+            isCurrent: () => current
+        });
+
+        current = false;
+        release.resolve();
+        await held;
+        await expect(publication).rejects.toBeInstanceOf(ConcurrentSessionWriteError);
+        expect(provider.writes).toHaveLength(0);
+        expect(connections.installAuthenticationBinding).not.toHaveBeenCalled();
+    });
+
+    it('preserves an unresolved marker instead of replacing its session authority', async () => {
+        const provider = createProvider({ SessionSwitchEnvelope: createPendingEnvelope(1) });
+        const { connections, apiClient, result } = arrangeLoginPublication(provider);
+        expect(() => connections.captureLoginAuthority('server-1')).toThrow();
+
+        await expect(connections.publishLoginAuthentication(apiClient, result, {
+            expectedAuthorityRevision: 0,
+            isCurrent: () => true
+        })).rejects.toThrow();
+        expect(provider.writes).toHaveLength(0);
+    });
+
+    it('does not publish sign-in after logout wins during bootstrap', async () => {
+        const { connections, apiClient, provider, result } = arrangeLoginPublication();
+        const bootstrap = createDeferred();
+        connections.bootstrapAuthenticatedUser.mockReturnValue(bootstrap.promise);
+        const signedIn = vi.fn();
+        Events.on(connections, 'localusersignedin', signedIn);
+        const expectedAuthorityRevision = connections.captureLoginAuthority('server-1');
+        const publication = connections.publishLoginAuthentication(apiClient, result, {
+            expectedAuthorityRevision,
+            isCurrent: () => true
+        });
+
+        await vi.waitFor(() => expect(connections.bootstrapAuthenticatedUser).toHaveBeenCalledOnce());
+        await connections.logout();
+        bootstrap.resolve();
+        await expect(publication).rejects.toBeInstanceOf(ConcurrentSessionWriteError);
+        expect(provider.state().Servers[0].AccessToken).toBeNull();
+        expect(connections.publishLocalUserState).not.toHaveBeenCalled();
+        expect(signedIn).not.toHaveBeenCalled();
+    });
+
+    it('finishes auth publication when viewhide cancels UI after the durable sink', async () => {
+        const { connections, apiClient, activeApiClient, provider, result } = arrangeLoginPublication();
+        const bootstrap = createDeferred();
+        connections.bootstrapAuthenticatedUser.mockReturnValue(bootstrap.promise);
+        const signedIn = vi.fn();
+        Events.on(connections, 'localusersignedin', signedIn);
+        let current = true;
+        const publication = connections.publishLoginAuthentication(apiClient, result, {
+            expectedAuthorityRevision: connections.captureLoginAuthority('server-1'),
+            isCurrent: () => current
+        });
+
+        await vi.waitFor(() => expect(connections.bootstrapAuthenticatedUser).toHaveBeenCalledOnce());
+        current = false;
+        bootstrap.resolve();
+        await publication;
+
+        expect(provider.state().Servers[0]).toEqual(expect.objectContaining({
+            UserId: 'new-user', AccessToken: 'new-token'
+        }));
+        expect(connections.publishLocalUserState).toHaveBeenCalledOnce();
+        expect(activeApiClient.ensureWebSocket).toHaveBeenCalledOnce();
+        expect(signedIn).toHaveBeenCalledOnce();
+    });
+
+    it('finishes a committed bootstrap before a newer manual login publishes', async () => {
+        const { connections, apiClient, provider, result } = arrangeLoginPublication();
+        const firstBootstrap = createDeferred();
+        connections.bootstrapAuthenticatedUser
+            .mockImplementationOnce(() => firstBootstrap.promise)
+            .mockResolvedValue(undefined);
+        let firstCurrent = true;
+        const firstPublication = connections.publishLoginAuthentication(apiClient, result, {
+            expectedAuthorityRevision: connections.captureLoginAuthority('server-1'),
+            isCurrent: () => firstCurrent
+        });
+        await vi.waitFor(() => expect(connections.bootstrapAuthenticatedUser).toHaveBeenCalledOnce());
+
+        const secondPublication = connections.publishLoginAuthentication(apiClient, {
+            ...result,
+            AccessToken: 'manual-token',
+            User: { Id: 'manual-user' }
+        }, {
+            expectedAuthorityRevision: connections.captureLoginAuthority('server-1'),
+            isCurrent: () => true
+        });
+        expect(provider.writes).toHaveLength(1);
+        firstCurrent = false;
+        firstBootstrap.resolve();
+
+        await firstPublication;
+        await secondPublication;
+        expect(provider.state().Servers[0]).toEqual(expect.objectContaining({
+            UserId: 'manual-user', AccessToken: 'manual-token'
+        }));
+        expect(connections.publishLocalUserState).toHaveBeenCalledTimes(2);
+    });
+
+    it('settles a rejected W2 bootstrap and leaves the publication queue usable', async () => {
+        const { connections, apiClient, result } = arrangeLoginPublication();
+        connections.bootstrapAuthenticatedUser.mockRejectedValueOnce(new Error('bootstrap failed'));
+        const expectedAuthorityRevision = connections.captureLoginAuthority('server-1');
+
+        await expect(connections.publishLoginAuthentication(apiClient, result, {
+            expectedAuthorityRevision,
+            isCurrent: () => true
+        })).rejects.toThrow('bootstrap failed');
+        expect(connections.publishLocalUserState).not.toHaveBeenCalled();
+
+        const nextAuthorityRevision = connections.captureLoginAuthority('server-1');
+        await connections.publishLoginAuthentication(apiClient, {
+            ...result,
+            AccessToken: 'later-token'
+        }, {
+            expectedAuthorityRevision: nextAuthorityRevision,
+            isCurrent: () => true
+        });
+        expect(connections.publishLocalUserState).toHaveBeenCalledOnce();
+    });
     it('publishes the envelope and legacy auth projection only after one durable write', async () => {
         const provider = createProvider();
         const connections = createConnections(provider);
