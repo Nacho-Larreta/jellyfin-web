@@ -10,7 +10,8 @@ import type { ApiClient } from 'jellyfin-apiclient';
 import { appRouter } from 'components/router/appRouter';
 import { JellyflixCollectionType, isAdultVideosCollectionType } from 'constants/jellyflixCollectionTypes';
 import Dashboard from 'utils/dashboard';
-import { getItemBackdropImageUrl } from 'utils/jellyfin-apiclient/backdropImage';
+import type { HomeImageDescriptor } from 'utils/jellyfin-apiclient/sessionImageRead';
+import { getWideDescriptor } from '../homeImageScope';
 import { queryClient } from 'utils/query/queryClient';
 import globalize from 'lib/globalize';
 import type { HomeSessionRead } from './homeSessionRead';
@@ -186,40 +187,6 @@ function getLibraryPriority(library: LibraryViewModel): number {
     return 100;
 }
 
-function getWideImageUrl(apiClient: ApiClient, item: BaseItemDto): string | undefined {
-    const backdropUrl = getItemBackdropImageUrl(apiClient, item, {
-        fillWidth: 640,
-        fillHeight: 360,
-        quality: 84
-    });
-
-    if (backdropUrl) {
-        return backdropUrl;
-    }
-
-    if (item.Id && item.ImageTags?.Thumb) {
-        return apiClient.getScaledImageUrl(item.Id, {
-            type: ImageType.Thumb,
-            tag: item.ImageTags.Thumb,
-            fillWidth: 640,
-            fillHeight: 360,
-            quality: 84
-        });
-    }
-
-    if (item.Id && item.ImageTags?.Primary) {
-        return apiClient.getScaledImageUrl(item.Id, {
-            type: ImageType.Primary,
-            tag: item.ImageTags.Primary,
-            fillWidth: 640,
-            fillHeight: 360,
-            quality: 84
-        });
-    }
-
-    return undefined;
-}
-
 function getProgressPercent(item: BaseItemDto): number {
     const playbackTicks = item.UserData?.PlaybackPositionTicks || 0;
     const runtimeTicks = item.RunTimeTicks || 0;
@@ -379,20 +346,21 @@ function renderLibrariesSection(libraries: BaseItemDto[], user: UserDto): string
     return html;
 }
 
-function renderWideCard(apiClient: ApiClient, item: BaseItemDto, subtitle: string, options: {
+function renderWideCard(item: BaseItemDto, subtitle: string, images: HomeImageDescriptor[], options: {
     badge?: string;
     showProgress?: boolean;
 } = {}): string {
     const href = appRouter.getRouteUrl(item);
-    const imageUrl = getWideImageUrl(apiClient, item);
+    const descriptor = getWideDescriptor(item);
     const title = getDisplayTitle(item);
     const progressPercent = options.showProgress ? getProgressPercent(item) : 0;
 
     let html = '<a is="emby-linkbutton" class="tvHomeMediaCard" href="' + escapeHtml(href) + '">';
     html += '<span class="tvHomeMediaCard__imageFrame">';
 
-    if (imageUrl) {
-        html += '<img class="tvHomeMediaCard__image" src="' + escapeHtml(imageUrl) + '" alt="" loading="lazy" />';
+    if (descriptor) {
+        const imageIndex = images.push(descriptor) - 1;
+        html += '<img class="tvHomeMediaCard__image" data-home-image-index="' + imageIndex + '" alt="" loading="lazy" width="640" height="360" />';
     } else {
         html += '<span class="tvHomeMediaCard__placeholder material-icons movie" aria-hidden="true"></span>';
     }
@@ -421,11 +389,10 @@ function renderWideCard(apiClient: ApiClient, item: BaseItemDto, subtitle: strin
 }
 
 function renderRailSection(
-    apiClient: ApiClient,
     title: string,
     subtitle: string,
     items: BaseItemDto[],
-    cardRenderer: (apiClient: ApiClient, item: BaseItemDto) => string,
+    cardRenderer: (item: BaseItemDto) => string,
     modifier: string,
     actionHtml = ''
 ): string {
@@ -437,7 +404,7 @@ function renderRailSection(
     html += renderSectionHeader(title, subtitle, actionHtml);
     html += '<div class="tvHomeDashboard__railViewport">';
     html += '<div class="tvHomeDashboard__rail tvHomeDashboard__rail--' + modifier + '">';
-    html += items.map(item => cardRenderer(apiClient, item)).join('');
+    html += items.map(item => cardRenderer(item)).join('');
     html += '</div>';
     html += '</div>';
     html += '</section>';
@@ -554,33 +521,38 @@ function renderLoadState(state: HomeLoadState): string {
         + '</section>';
 }
 
-function renderDashboard(apiClient: ApiClient, user: UserDto, libraries: BaseItemDto[], resumeItems: BaseItemDto[], nextUpItems: BaseItemDto[], latestItems: BaseItemDto[], state: HomeLoadState): string {
+function renderDashboard(apiClient: ApiClient, user: UserDto, data: {
+    libraries: BaseItemDto[];
+    resumeItems: BaseItemDto[];
+    nextUpItems: BaseItemDto[];
+    latestItems: BaseItemDto[];
+    state: HomeLoadState;
+    images: HomeImageDescriptor[];
+}): string {
+    const { libraries, resumeItems, nextUpItems, latestItems, state, images } = data;
     let html = '<div class="tvHomeDashboard__content">';
     html += renderLoadState(state);
     html += renderLibrariesSection(libraries, user);
     html += renderRailSection(
-        apiClient,
         globalize.translate('HeaderContinueWatching'),
         globalize.translate('HomeContinueWatchingHint'),
         resumeItems,
-        (client, item) => renderWideCard(client, item, getResumeSubtitle(item), { showProgress: true }),
+        item => renderWideCard(item, getResumeSubtitle(item), images, { showProgress: true }),
         'resume'
     );
     html += renderRailSection(
-        apiClient,
         globalize.translate('NextUp'),
         globalize.translate('HomeNextUpHint'),
         nextUpItems,
-        (client, item) => renderWideCard(client, item, getNextUpSubtitle(item), { badge: globalize.translate('NextUp').toLocaleUpperCase() }),
+        item => renderWideCard(item, getNextUpSubtitle(item), images, { badge: globalize.translate('NextUp').toLocaleUpperCase() }),
         'nextUp',
         renderSectionAction(globalize.translate('ViewAll'), appRouter.getRouteUrl('nextup', { serverId: apiClient.serverId() }))
     );
     html += renderRailSection(
-        apiClient,
         globalize.translate('RecentlyAdded'),
         globalize.translate('HomeRecentlyAddedHint'),
         latestItems,
-        (client, item) => renderWideCard(client, item, getRecentlyAddedSubtitle(item)),
+        item => renderWideCard(item, getRecentlyAddedSubtitle(item), images),
         'latest'
     );
     html += '</div>';
@@ -641,10 +613,25 @@ export function loadTvHomeDashboard(elem: HTMLElement | null, session: HomeSessi
             session.assertCurrent();
             const hasMedia = Boolean(resumeItems.length || nextUpItems.length || latestItems.length);
             const loadState = getHomeLoadState(Boolean(getVisibleLibraries(libraries).length), sectionStatuses, hasMedia);
-            elem.innerHTML = renderDashboard(session.apiClient, user, libraries, resumeItems, nextUpItems, latestItems, loadState);
+            const images: HomeImageDescriptor[] = [];
+            elem.innerHTML = renderDashboard(session.apiClient, user, {
+                libraries, resumeItems, nextUpItems, latestItems, state: loadState, images
+            });
             setWithoutResumeHeroState(elem, !resumeItems.length);
             elem.classList.remove('hide');
             elem.classList.remove('is-loading');
+
+            elem.querySelectorAll<HTMLImageElement>('.tvHomeMediaCard__image[data-home-image-index]').forEach(image => {
+                const index = Number(image.dataset.homeImageIndex);
+                const descriptor = images[index];
+                if (!descriptor) return;
+                session.images.add(image, descriptor, () => {
+                    const placeholder = document.createElement('span');
+                    placeholder.className = 'tvHomeMediaCard__placeholder material-icons movie';
+                    placeholder.setAttribute('aria-hidden', 'true');
+                    image.replaceWith(placeholder);
+                });
+            });
 
             elem.querySelector('.btnTvHomeManageLibraries')?.addEventListener('click', () => {
                 try {

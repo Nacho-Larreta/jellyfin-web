@@ -3,14 +3,13 @@ import { ItemFields } from '@jellyfin/sdk/lib/generated-client/models/item-field
 import { MediaType } from '@jellyfin/sdk/lib/generated-client/models/media-type';
 import { CancelledError } from '@tanstack/react-query';
 import type { BaseItemDto } from '@jellyfin/sdk/lib/generated-client/models/base-item-dto';
-import type { ApiClient } from 'jellyfin-apiclient';
 import escapeHtml from 'escape-html';
 
 import { playbackManager } from 'components/playback/playbackmanager';
 import { appRouter } from 'components/router/appRouter';
 import datetime from 'scripts/datetime';
 import globalize from 'lib/globalize';
-import { getItemBackdropImageUrl } from 'utils/jellyfin-apiclient/backdropImage';
+import { getBackdropDescriptor, getHeroPosterDescriptor } from '../homeImageScope';
 
 import type { HomeSessionRead } from './homeSessionRead';
 
@@ -35,37 +34,6 @@ function getResumeItem(session: HomeSessionRead): Promise<BaseItemDto | undefine
         session.assertCurrent();
         return result.Items?.[0];
     });
-}
-
-function getPrimaryImageUrl(apiClient: ApiClient, item: BaseItemDto): string | undefined {
-    if (item.Id && item.ImageTags?.Primary) {
-        return apiClient.getScaledImageUrl(item.Id, {
-            type: ImageType.Primary,
-            tag: item.ImageTags.Primary,
-            maxHeight: 520,
-            quality: 90
-        });
-    }
-
-    if (item.SeriesId && item.SeriesPrimaryImageTag) {
-        return apiClient.getScaledImageUrl(item.SeriesId, {
-            type: ImageType.Primary,
-            tag: item.SeriesPrimaryImageTag,
-            maxHeight: 520,
-            quality: 90
-        });
-    }
-
-    if (item.ParentPrimaryImageItemId && item.ParentPrimaryImageTag) {
-        return apiClient.getScaledImageUrl(item.ParentPrimaryImageItemId, {
-            type: ImageType.Primary,
-            tag: item.ParentPrimaryImageTag,
-            maxHeight: 520,
-            quality: 90
-        });
-    }
-
-    return undefined;
 }
 
 function getHeroTitle(item: BaseItemDto): string {
@@ -183,13 +151,13 @@ function playItem(item: BaseItemDto, serverId: string) {
     });
 }
 
-function getHeroHtml(apiClient: ApiClient, item: BaseItemDto): string {
-    const backdropUrl = getItemBackdropImageUrl(apiClient, item, {
+function getHeroHtml(item: BaseItemDto): string {
+    const backdrop = getBackdropDescriptor(item, {
         fillWidth: 1920,
         fillHeight: 1080,
         quality: 88
     });
-    const primaryUrl = getPrimaryImageUrl(apiClient, item);
+    const primary = getHeroPosterDescriptor(item);
     const title = getHeroTitle(item);
     const episodeLabel = getEpisodeLabel(item);
     const episodeCode = getEpisodeCode(item);
@@ -201,8 +169,8 @@ function getHeroHtml(apiClient: ApiClient, item: BaseItemDto): string {
 
     let html = '<section class="tvHomeHero__shell" aria-label="' + escapeHtml(globalize.translate('HeaderContinueWatching')) + '">';
 
-    if (backdropUrl) {
-        html += '<img class="tvHomeHero__backdrop" src="' + escapeHtml(backdropUrl) + '" alt="" loading="eager" />';
+    if (backdrop) {
+        html += '<img class="tvHomeHero__backdrop" alt="" loading="eager" width="1920" height="1080" />';
     }
 
     html += '<div class="tvHomeHero__shade tvHomeHero__shade--side"></div>';
@@ -241,9 +209,9 @@ function getHeroHtml(apiClient: ApiClient, item: BaseItemDto): string {
     html += '</div>';
     html += '</div>';
 
-    if (primaryUrl) {
+    if (primary) {
         html += '<div class="tvHomeHero__posterFrame">';
-        html += '<img class="tvHomeHero__poster" src="' + escapeHtml(primaryUrl) + '" alt="" loading="eager" />';
+        html += '<img class="tvHomeHero__poster" alt="" loading="eager" width="347" height="520" />';
         html += '</div>';
     }
 
@@ -274,8 +242,19 @@ export function loadTvHomeHero(elem: HTMLElement | null, session: HomeSessionRea
                 return;
             }
 
-            elem.innerHTML = getHeroHtml(session.apiClient, item);
+            elem.innerHTML = getHeroHtml(item);
             elem.classList.remove('hide');
+
+            const backdrop = getBackdropDescriptor(item, { fillWidth: 1920, fillHeight: 1080, quality: 88 });
+            const backdropElement = elem.querySelector<HTMLImageElement>('.tvHomeHero__backdrop');
+            if (backdrop && backdropElement) {
+                session.images.add(backdropElement, backdrop, () => backdropElement.remove(), true);
+            }
+            const poster = getHeroPosterDescriptor(item);
+            const posterElement = elem.querySelector<HTMLImageElement>('.tvHomeHero__poster');
+            if (poster && posterElement) {
+                session.images.add(posterElement, poster, () => posterElement.closest('.tvHomeHero__posterFrame')?.remove(), true);
+            }
 
             const playButton = elem.querySelector('.btnTvHomeHeroPlay');
             playButton?.addEventListener('click', () => {

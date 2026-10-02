@@ -1,11 +1,14 @@
 import { CancelledError } from '@tanstack/react-query';
+import Events from '../utils/events';
 
 import focusManager from '../components/focusManager';
 import { destroyTvHomeDashboard, loadTvHomeDashboard, showUnavailableTvHomeDashboard } from '../components/homesections/sections/tvHomeDashboard';
 import { destroyTvHomeHero, loadTvHomeHero } from '../components/homesections/sections/tvHomeHero';
+import { createHomeImageScope } from '../components/homesections/homeImageScope';
 import { ServerConnections } from 'lib/jellyfin-apiclient';
 import { getWebSessionSwitchApplication } from 'lib/profileSelector/sessionSwitch/application';
 import { createSessionScopedReadApi, SessionReadCancelledError } from 'utils/jellyfin-apiclient/sessionReadApi';
+import { createSessionImageRead } from 'utils/jellyfin-apiclient/sessionImageRead';
 
 import '../components/homesections/homesections.scss';
 import '../elements/emby-itemscontainer/emby-itemscontainer';
@@ -17,9 +20,13 @@ class HomeTab {
         this.dashboardElement = view.querySelector('.tvHomeDashboard');
         this.generation = 0;
         this.paused = true;
+        this.imageScope = null;
+        this.unsubscribeAuthority = null;
+        this.sessionEventHandler = null;
     }
 
     onResume(options) {
+        this.clear();
         const generation = ++this.generation;
         this.paused = false;
         const apiClient = ServerConnections.currentApiClient();
@@ -31,7 +38,6 @@ class HomeTab {
         }
 
         if (!apiClient || !port) {
-            this.clear();
             showUnavailableTvHomeDashboard(this.dashboardElement);
             return Promise.resolve();
         }
@@ -43,6 +49,22 @@ class HomeTab {
             }
             read.assertCurrent();
         };
+        const verifyAuthority = () => {
+            try {
+                assertCurrent();
+            } catch {
+                if (this.generation === generation) {
+                    this.onPause();
+                    showUnavailableTvHomeDashboard(this.dashboardElement);
+                }
+            }
+        };
+
+        this.unsubscribeAuthority = ServerConnections.subscribeSessionSwitchEnvelope(read.identity.serverId, verifyAuthority);
+        this.sessionEventHandler = verifyAuthority;
+        for (const event of ['localusersignedin', 'localusersignedout', 'sessionswitchcompleted']) {
+            Events.on(ServerConnections, event, verifyAuthority);
+        }
         try {
             assertCurrent();
         } catch (error) {
@@ -54,14 +76,14 @@ class HomeTab {
             throw error;
         }
 
-        this.clear();
+        this.imageScope = createHomeImageScope(this.view, createSessionImageRead(apiClient, port));
         return read.getCurrentUser().then(user => {
             assertCurrent();
             if (!user?.Id || user.Id !== read.identity.profileUserId
                 || user.ServerId && user.ServerId !== read.identity.serverId) {
                 throw new SessionReadCancelledError();
             }
-            const homeRead = { apiClient, read, user, assertCurrent };
+            const homeRead = { apiClient, read, user, assertCurrent, images: this.imageScope };
             return Promise.all([
                 loadTvHomeHero(this.heroElement, homeRead),
                 loadTvHomeDashboard(this.dashboardElement, homeRead)
@@ -95,6 +117,16 @@ class HomeTab {
     }
 
     clear() {
+        this.unsubscribeAuthority?.();
+        this.unsubscribeAuthority = null;
+        if (this.sessionEventHandler) {
+            for (const event of ['localusersignedin', 'localusersignedout', 'sessionswitchcompleted']) {
+                Events.off(ServerConnections, event, this.sessionEventHandler);
+            }
+            this.sessionEventHandler = null;
+        }
+        this.imageScope?.dispose();
+        this.imageScope = null;
         destroyTvHomeDashboard(this.dashboardElement);
         if (this.heroElement) destroyTvHomeHero(this.heroElement);
     }

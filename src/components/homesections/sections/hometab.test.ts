@@ -2,6 +2,13 @@ import { CancelledError } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('components/focusManager', () => ({ default: { autoFocus: vi.fn() } }));
+vi.mock('components/apphost', () => ({ appHost: {
+    appName: () => 'test-app', appVersion: () => '1', deviceId: () => 'device-a', deviceName: () => 'Browser'
+} }));
+vi.mock('scripts/settings/appSettings', () => ({ default: { enableAutoLogin: () => true } }));
+vi.mock('scripts/settings/userSettings', () => ({ setUserInfo: vi.fn() }));
+vi.mock('utils/dashboard', () => ({ default: { capabilities: () => ({}) } }));
+vi.mock('utils/jellyfin-apiclient/compat', () => ({ toApi: vi.fn() }));
 vi.mock('components/homesections/sections/tvHomeHero', () => ({
     destroyTvHomeHero: vi.fn((element: HTMLElement) => {
         element.innerHTML = '';
@@ -17,7 +24,10 @@ vi.mock('components/homesections/sections/tvHomeDashboard', () => ({
     loadTvHomeDashboard: vi.fn(async () => undefined),
     showUnavailableTvHomeDashboard: vi.fn((element: HTMLElement) => { element.textContent = 'Home unavailable'; })
 }));
-vi.mock('lib/jellyfin-apiclient', () => ({ ServerConnections: { currentApiClient: vi.fn() } }));
+vi.mock('lib/jellyfin-apiclient', () => ({ ServerConnections: {
+    currentApiClient: vi.fn(),
+    subscribeSessionSwitchEnvelope: vi.fn(() => vi.fn())
+} }));
 vi.mock('lib/profileSelector/sessionSwitch/application', () => ({
     getWebSessionSwitchApplication: vi.fn(() => ({ captureBoundSessionRead: vi.fn() }))
 }));
@@ -25,6 +35,8 @@ vi.mock('utils/jellyfin-apiclient/sessionReadApi', async importOriginal => ({
     ...await importOriginal<typeof import('utils/jellyfin-apiclient/sessionReadApi')>(),
     createSessionScopedReadApi: vi.fn()
 }));
+vi.mock('utils/jellyfin-apiclient/sessionImageRead', () => ({ createSessionImageRead: vi.fn(() => ({ assertCurrent: vi.fn() })) }));
+vi.mock('components/homesections/homeImageScope', () => ({ createHomeImageScope: vi.fn(() => ({ add: vi.fn(), dispose: vi.fn() })) }));
 vi.mock('elements/emby-itemscontainer/emby-itemscontainer', () => ({}));
 
 import { loadTvHomeDashboard, showUnavailableTvHomeDashboard } from 'components/homesections/sections/tvHomeDashboard';
@@ -32,6 +44,8 @@ import { loadTvHomeHero } from 'components/homesections/sections/tvHomeHero';
 import { ServerConnections } from 'lib/jellyfin-apiclient';
 import { getWebSessionSwitchApplication } from 'lib/profileSelector/sessionSwitch/application';
 import { createSessionScopedReadApi } from 'utils/jellyfin-apiclient/sessionReadApi';
+import { createHomeImageScope } from 'components/homesections/homeImageScope';
+import Events from 'utils/events';
 
 import HomeTab from '../../../controllers/hometab';
 
@@ -55,6 +69,7 @@ function view() {
 
 beforeEach(() => {
     vi.clearAllMocks();
+    Reflect.deleteProperty(ServerConnections, '_callbacks');
 });
 
 describe('HomeTab bound read resume', () => {
@@ -192,5 +207,113 @@ describe('HomeTab bound read resume', () => {
         } finally {
             log.mockRestore();
         }
+    });
+
+    it('clears painted Home and its image scope synchronously on authority notification, without ABA resurrection', async () => {
+        const client = { serverId: () => 'server-a' };
+        const port = { identity: { serverId: 'server-a', profileUserId: 'user-a', sessionEpoch: 1 } };
+        let current = true;
+        const unsubscribe = vi.fn();
+        vi.mocked(ServerConnections.currentApiClient).mockReturnValue(client as never);
+        vi.mocked(ServerConnections.subscribeSessionSwitchEnvelope).mockReturnValue(unsubscribe);
+        vi.mocked(getWebSessionSwitchApplication).mockReturnValue({ captureBoundSessionRead: () => port } as never);
+        vi.mocked(createSessionScopedReadApi).mockReturnValue({
+            identity: port.identity,
+            assertCurrent: () => {
+                if (!current) throw new CancelledError();
+            },
+            getCurrentUser: async () => ({ Id: 'user-a', ServerId: 'server-a' })
+        } as never);
+
+        const element = view();
+        const controller = new HomeTab(element);
+        await controller.onResume({});
+        const hero = element.querySelector('.tvHomeHero')!;
+        const dashboard = element.querySelector('.tvHomeDashboard')!;
+        hero.textContent = 'A hero';
+        dashboard.textContent = 'A cards';
+        const notify = vi.mocked(ServerConnections.subscribeSessionSwitchEnvelope).mock.calls[0][1];
+
+        current = false;
+        notify(null);
+        expect(hero.textContent).toBe('');
+        expect(dashboard.textContent).toBe('Home unavailable');
+        expect(vi.mocked(createHomeImageScope).mock.results[0].value.dispose).toHaveBeenCalledOnce();
+        expect(unsubscribe).toHaveBeenCalledOnce();
+        current = true;
+        notify(null);
+        expect(hero.textContent).toBe('');
+        expect(dashboard.textContent).toBe('Home unavailable');
+    });
+
+    it('clears painted images on the logout event and releases listeners on pause', async () => {
+        const client = { serverId: () => 'server-a' };
+        const port = { identity: { serverId: 'server-a', profileUserId: 'user-a', sessionEpoch: 1 } };
+        let current = true;
+        vi.mocked(ServerConnections.currentApiClient).mockReturnValue(client as never);
+        vi.mocked(getWebSessionSwitchApplication).mockReturnValue({ captureBoundSessionRead: () => port } as never);
+        vi.mocked(createSessionScopedReadApi).mockReturnValue({
+            identity: port.identity,
+            assertCurrent: () => {
+                if (!current) throw new CancelledError();
+            },
+            getCurrentUser: async () => ({ Id: 'user-a', ServerId: 'server-a' })
+        } as never);
+
+        const element = view();
+        const controller = new HomeTab(element);
+        await controller.onResume({});
+        element.querySelector('.tvHomeHero')!.textContent = 'A hero';
+        current = false;
+        Events.trigger(ServerConnections, 'localusersignedout', [{ serverId: 'server-a' }]);
+        expect(element.textContent).not.toContain('A hero');
+        expect(vi.mocked(createHomeImageScope).mock.results[0].value.dispose).toHaveBeenCalledOnce();
+        controller.onPause();
+        Events.trigger(ServerConnections, 'localusersignedout', [{ serverId: 'server-a' }]);
+        expect(vi.mocked(createHomeImageScope).mock.results[0].value.dispose).toHaveBeenCalledOnce();
+    });
+
+    it('clears visible Home through the real selector setter notification and stays cleared after false-true-false', async () => {
+        const { ServerConnections: RealConnections } = await vi.importActual<typeof import('lib/jellyfin-apiclient/ServerConnections')>(
+            'lib/jellyfin-apiclient/ServerConnections'
+        );
+        let credentials = { Servers: [{ Id: 'server-a', ProfileSelectorEnabled: false, SessionSwitchEnvelope: null }] };
+        let listener: (() => void) | undefined;
+        const connections = ServerConnections as unknown as Record<string, unknown>;
+        Object.assign(connections, {
+            readFreshCredentials: () => credentials,
+            withSessionEnvelopeLock: (_serverId: string, action: () => unknown) => Promise.resolve(action()),
+            persistCredentials: (_previous: unknown, next: typeof credentials) => { credentials = next; },
+            notifySessionSwitchEnvelope: () => listener?.(),
+            updateSavedServer: RealConnections.prototype.updateSavedServer,
+            setProfileSelectorAvailability: RealConnections.prototype.setProfileSelectorAvailability
+        });
+        vi.mocked(ServerConnections.subscribeSessionSwitchEnvelope).mockImplementation((_serverId, callback) => {
+            listener = callback;
+            return () => {
+                listener = undefined;
+            };
+        });
+        const client = { serverId: () => 'server-a' };
+        const port = { identity: { serverId: 'server-a', profileUserId: 'user-a', sessionEpoch: 1 } };
+        vi.mocked(ServerConnections.currentApiClient).mockReturnValue(client as never);
+        vi.mocked(getWebSessionSwitchApplication).mockReturnValue({ captureBoundSessionRead: () => port } as never);
+        vi.mocked(createSessionScopedReadApi).mockReturnValue({
+            identity: port.identity,
+            assertCurrent: () => {
+                if (credentials.Servers[0].ProfileSelectorEnabled) throw new CancelledError();
+            },
+            getCurrentUser: async () => ({ Id: 'user-a', ServerId: 'server-a' })
+        } as never);
+
+        const element = view();
+        const controller = new HomeTab(element);
+        await controller.onResume({});
+        element.querySelector('.tvHomeHero')!.textContent = 'visible A';
+        await RealConnections.prototype.setProfileSelectorAvailability.call(connections, 'server-a', true);
+        expect(element.textContent).not.toContain('visible A');
+        expect(vi.mocked(createHomeImageScope).mock.results[0].value.dispose).toHaveBeenCalledOnce();
+        await RealConnections.prototype.setProfileSelectorAvailability.call(connections, 'server-a', false);
+        expect(element.textContent).not.toContain('visible A');
     });
 });

@@ -50,6 +50,7 @@ function homeSession(
         apiClient: { serverId: () => identity.serverId } as ApiClient,
         read,
         user: { Id: identity.profileUserId, ServerId: identity.serverId } as UserDto,
+        images: { add: vi.fn(), dispose: vi.fn() },
         assertCurrent: () => read.assertCurrent()
     };
     const stale = () => {
@@ -153,6 +154,52 @@ describe('visible Home session read boundary', () => {
 
         expect(dashboard.querySelector('.tvHomeDashboard__loadState--partial')).not.toBeNull();
         expect(dashboard.classList.contains('hide')).toBe(false);
+    });
+
+    it('renders image slots without remote URLs while preserving card text and fallback descriptors', async () => {
+        const itemId = '5dae694ba968f2676a64ceb6934f667b';
+        const item = {
+            Id: itemId,
+            Name: 'Current film',
+            Type: 'Movie',
+            BackdropImageTags: ['backdrop-tag'],
+            ImageTags: { Primary: 'poster-tag' },
+            UserData: { Key: itemId, PlaybackPositionTicks: 10 },
+            RunTimeTicks: 100
+        } as BaseItemDto;
+        const { session } = homeSession({ getResumeItems: vi.fn(async () => ({ Items: [item] })) });
+        const hero = document.createElement('div');
+        const dashboard = document.createElement('div');
+
+        await loadTvHomeHero(hero, session);
+        await loadTvHomeDashboard(dashboard, session);
+
+        expect(hero.textContent).toContain('Current film');
+        expect(dashboard.textContent).toContain('Current film');
+        expect(hero.querySelectorAll('img')).toHaveLength(2);
+        expect(dashboard.querySelectorAll('img')).toHaveLength(1);
+        expect([ ...hero.querySelectorAll('img'), ...dashboard.querySelectorAll('img') ]
+            .every(image => !image.hasAttribute('src'))).toBe(true);
+        expect(session.images.add).toHaveBeenCalledTimes(3);
+        const descriptors = vi.mocked(session.images.add).mock.calls.map(([, descriptor]) => descriptor);
+        expect(descriptors).toEqual([
+            expect.objectContaining({ itemId, type: 'Backdrop', fillWidth: 1920, fillHeight: 1080, quality: 88 }),
+            expect.objectContaining({ itemId, type: 'Primary', maxHeight: 520, quality: 90 }),
+            expect.objectContaining({ itemId, type: 'Backdrop', fillWidth: 640, fillHeight: 360, quality: 84 })
+        ]);
+    });
+
+    it('keeps a titled playable card and its existing placeholder when metadata has no image', async () => {
+        const item = { Id: '5dae694ba968f2676a64ceb6934f667b', Name: 'No art film', Type: 'Movie' } as BaseItemDto;
+        const { session } = homeSession({ getResumeItems: vi.fn(async () => ({ Items: [item] })) });
+        const dashboard = document.createElement('div');
+
+        await loadTvHomeDashboard(dashboard, session);
+
+        expect(dashboard.querySelector('.tvHomeMediaCard__title')?.textContent).toBe('No art film');
+        expect(dashboard.querySelector('.tvHomeMediaCard__placeholder')).not.toBeNull();
+        expect(dashboard.querySelector('.tvHomeMediaCard__play')).not.toBeNull();
+        expect(dashboard.querySelector('.tvHomeMediaCard__image')).toBeNull();
     });
 
     it('does not reuse Views cache across a same-user epoch and generation replacement', async () => {
