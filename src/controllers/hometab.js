@@ -7,6 +7,7 @@ import { ServerConnections } from 'lib/jellyfin-apiclient';
 import { getWebSessionSwitchApplication } from 'lib/profileSelector/sessionSwitch/application';
 import { createSessionScopedReadApi, SessionReadCancelledError } from 'utils/jellyfin-apiclient/sessionReadApi';
 
+import '../components/homesections/homesections.scss';
 import '../elements/emby-itemscontainer/emby-itemscontainer';
 
 class HomeTab {
