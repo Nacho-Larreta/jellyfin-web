@@ -36,6 +36,7 @@ vi.mock('jellyfin-apiclient', () => ({
         }
         accessToken = vi.fn(() => this.authenticationToken ?? null);
         closeWebSocket = vi.fn();
+        deviceId = vi.fn(() => this.constructorArgs[4]);
         ensureWebSocket = vi.fn();
         getCurrentUser = vi.fn();
         getCurrentUserId = vi.fn(() => this.authenticationUserId ?? null);
@@ -71,6 +72,8 @@ import {
     createOwnerRecoverySession
 } from '../profileSelector/sessionSwitch/model';
 import { SessionAdmissionBarrier } from '../profileSelector/sessionSwitch/barrier';
+import { getWebSessionSwitchApplication } from '../profileSelector/sessionSwitch/application';
+import { WebSocketSessionAdmission } from '../profileSelector/sessionSwitch/realtimeAdmission';
 import {
     ServerConnectionsSessionSwitchStore,
     createSessionSwitchEnvelope
@@ -1248,5 +1251,99 @@ describe('ServerConnections session envelope adapter', () => {
         });
         expect(completed).toHaveBeenCalledWith(expect.anything(), receipt);
         expect(signedIn).not.toHaveBeenCalled();
+    });
+
+    it('admits realtime only after the real terminal receipt, not completion events during a marker', async () => {
+        const provider = createProvider({
+            ManualAddress: 'https://server',
+            ProfileSelectorEnabled: true,
+            SessionSwitchAuthorityRevision: 0
+        });
+        const connections = createConnections(provider);
+        connections.websocketAdmission.dispose();
+        const probe = vi.fn(async (_client, port) => ({
+            Id: port.binding.profileUserId,
+            ServerId: 'server-1'
+        }));
+        connections.websocketAdmission = new WebSocketSessionAdmission(
+            connections,
+            getWebSessionSwitchApplication(connections),
+            probe
+        );
+        connections.initApiClient('https://server');
+        const client = connections.getLocalApiClient();
+        let admittedOpens = 0;
+        client.ensureWebSocket.mockImplementation(() => {
+            if (client.websocketSessionProvider?.()?.isCurrent()) admittedOpens++;
+        });
+        client.setAuthenticationInfo('old-token', 'old-user');
+        connections.websocketAdmission.inspect();
+        await vi.waitFor(() => expect(admittedOpens).toBe(1));
+        const oldGuard = client.websocketSessionProvider();
+        const inspect = vi.spyOn(connections.websocketAdmission, 'inspect');
+        const triggerCompletion = signal => {
+            const priorInspections = inspect.mock.calls.length;
+            Events.trigger(connections, 'sessionswitchcompleted', [signal]);
+            expect(inspect).toHaveBeenCalledTimes(priorInspections + 1);
+        };
+        const publishedCompletion = vi.fn();
+        Events.on(connections, 'sessionswitchcompleted', publishedCompletion);
+
+        const pending = createPendingEnvelope();
+        const receipt = {
+            switchId: 'switch-1', serverId: 'server-1', profileUserId: 'target-user', sessionEpoch: 8
+        };
+        await connections.replaceSessionSwitchEnvelope('server-1', 0, pending);
+        expect(oldGuard.isCurrent()).toBe(false);
+        triggerCompletion({ ...receipt, switchId: 'foreign' });
+        triggerCompletion(receipt);
+        expect(admittedOpens).toBe(1);
+        expect(client.websocketSessionProvider()).toBeNull();
+
+        const targetSession = createActiveProfileSession(
+            'server-1', 'device-1', 'target-user', 'target-token', 8
+        );
+        const committed = {
+            ...pending,
+            revision: 2,
+            activeSession: targetSession,
+            marker: { ...pending.marker, kind: 'CommittedPendingCleanup', phase: 'Completing' }
+        };
+        await connections.replaceSessionSwitchEnvelope('server-1', 1, committed);
+        connections.installSessionAuthentication(targetSession);
+        connections.publishLocalUserState = vi.fn().mockResolvedValue(undefined);
+        const priorCompletionEvents = publishedCompletion.mock.calls.length;
+        await connections.publishSessionSwitchCompletion({ Id: 'target-user' }, receipt);
+        expect(publishedCompletion).toHaveBeenCalledTimes(priorCompletionEvents + 1);
+        expect(publishedCompletion.mock.lastCall).toEqual([expect.anything(), receipt]);
+        expect(connections.readFreshSessionAuthority('server-1').envelope.marker).not.toBeNull();
+        expect(admittedOpens).toBe(1);
+        expect(client.websocketSessionProvider()).toBeNull();
+
+        await connections.replaceSessionSwitchEnvelope('server-1', 2, {
+            ...committed,
+            revision: 3,
+            marker: null,
+            lastCompletion: { ...receipt, switchId: 'foreign' }
+        });
+        expect(admittedOpens).toBe(1);
+        expect(client.websocketSessionProvider()).toBeNull();
+
+        await connections.replaceSessionSwitchEnvelope('server-1', 3, {
+            ...committed,
+            revision: 4,
+            marker: null,
+            lastCompletion: receipt
+        });
+        await vi.waitFor(() => expect(admittedOpens).toBe(2));
+        const currentGuard = client.websocketSessionProvider();
+        const closeCount = client.closeWebSocket.mock.calls.length;
+        triggerCompletion(receipt);
+        triggerCompletion({ ...receipt, switchId: 'foreign' });
+        expect(currentGuard.isCurrent()).toBe(true);
+        expect(client.websocketSessionProvider()).toBe(currentGuard);
+        expect(admittedOpens).toBe(2);
+        expect(probe).toHaveBeenCalledTimes(2);
+        expect(client.closeWebSocket).toHaveBeenCalledTimes(closeCount);
     });
 });
