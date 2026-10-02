@@ -5,7 +5,7 @@ import { createPlaybackIdentity } from '../htmlMediaLifecycle';
 
 const reports = vi.hoisted(() => ({
     started: vi.fn(async () => undefined),
-    stopped: vi.fn(async (): Promise<void> => undefined)
+    stopped: vi.fn(async (info: unknown): Promise<void> => { expect(info).toBeDefined(); })
 }));
 const preparation = vi.hoisted(() => ({ getItem: vi.fn() }));
 const pluginRegistry = vi.hoisted(() => ({
@@ -430,7 +430,13 @@ describe('PlaybackManager profile switch stop with real bound handlers', () => {
         await assertion;
     });
 
-    it('rejects self-managed plugins without changing their ordinary stop reporting', async () => {
+    it.each([
+        { positionMs: 364.34, capturedTicks: undefined, expectedTicks: 3_643_400 },
+        { positionMs: Number.NaN, capturedTicks: undefined, expectedTicks: undefined },
+        { positionMs: Number.POSITIVE_INFINITY, capturedTicks: 1_200_000, expectedTicks: 1_200_000 },
+        { positionMs: -1, capturedTicks: undefined, expectedTicks: undefined },
+        { positionMs: Number.MAX_SAFE_INTEGER, capturedTicks: undefined, expectedTicks: undefined }
+    ])('rejects self-managed plugins and safely reports stop position $positionMs', async ({ positionMs, capturedTicks, expectedTicks }) => {
         const player = {
             name: 'Self-managed local player',
             id: 'self-managed',
@@ -440,7 +446,7 @@ describe('PlaybackManager profile switch stop with real bound handlers', () => {
             getPlaylistSync: () => [item],
             currentItem: () => item,
             playSessionId: () => 'play-old',
-            getPlayerState: () => ({ NowPlayingItem: item, PlayState: { PlaySessionId: 'play-old' } }),
+            getPlayerState: () => ({ NowPlayingItem: item, PlayState: { PlaySessionId: 'play-old', PositionTicks: capturedTicks } }),
             destroy: vi.fn(),
             stop: vi.fn()
         };
@@ -451,10 +457,13 @@ describe('PlaybackManager profile switch stop with real bound handlers', () => {
         await expect(manager.stopForProfileSwitch(player, item.Id, 'play-old')).rejects.toThrow('captured local player');
         expect(player.stop).not.toHaveBeenCalled();
 
-        Events.trigger(player, 'itemstopped', [{ item, mediaSource: null, positionMs: 25 }]);
+        Events.trigger(player, 'itemstopped', [{ item, mediaSource: null, positionMs }]);
         expect(reports.stopped).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
             ItemId: item.Id, PlaySessionId: 'play-old'
         }));
+        const wireBody = JSON.parse(JSON.stringify(reports.stopped.mock.calls[0][0]));
+        if (expectedTicks === undefined) expect(wireBody).not.toHaveProperty('PositionTicks');
+        else expect(wireBody.PositionTicks).toBe(expectedTicks);
     });
 
     it.each([item, { ...item, Id: 'cccccccc-cccc-4ccc-cccc-cccccccccccc' }])(

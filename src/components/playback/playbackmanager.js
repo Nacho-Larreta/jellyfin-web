@@ -73,6 +73,12 @@ function triggerPlayerChange(playbackManagerInstance, newPlayer, newTarget, prev
     Events.trigger(playbackManagerInstance, 'playerchange', [newPlayer, newTarget, previousPlayer]);
 }
 
+function millisecondsToTicks(positionMs, offsetTicks = 0) {
+    if (!Number.isFinite(positionMs) || positionMs < 0 || !Number.isFinite(offsetTicks)) return undefined;
+    const ticks = Math.round(positionMs * 10000 + offsetTicks);
+    return Number.isSafeInteger(ticks) && ticks >= 0 ? ticks : undefined;
+}
+
 function reportPlayback(playbackManagerInstance, state, player, reportPlaylist, serverId, method, progressEventName) {
     if (!serverId) {
         // Not a server item
@@ -83,6 +89,10 @@ function reportPlayback(playbackManagerInstance, state, player, reportPlaylist, 
 
     const info = Object.assign({}, state.PlayState);
     info.ItemId = state.NowPlayingItem.Id;
+
+    if (method === 'reportPlaybackStopped' && (!Number.isSafeInteger(info.PositionTicks) || info.PositionTicks < 0)) {
+        delete info.PositionTicks;
+    }
 
     if (progressEventName) {
         info.EventName = progressEventName;
@@ -3399,7 +3409,8 @@ export class PlaybackManager {
             streamInfo.ended = true;
 
             if (isServerItem(playerStopInfo.item)) {
-                state.PlayState.PositionTicks = (playerStopInfo.positionMs || 0) * 10000;
+                const positionTicks = millisecondsToTicks(playerStopInfo.positionMs ?? 0);
+                if (positionTicks !== undefined) state.PlayState.PositionTicks = positionTicks;
 
                 reportPlayback(self, state, player, true, playerStopInfo.item.ServerId, 'reportPlaybackStopped');
             }
@@ -3493,7 +3504,8 @@ export class PlaybackManager {
             const data = getPlayerData(player);
             const streamInfo = data.streamInfo;
             if (Number.isFinite(displayErrorCode?.positionMs) && state.PlayState) {
-                state.PlayState.PositionTicks = displayErrorCode.positionMs * 10000 + (streamInfo?.transcodingOffsetTicks || 0);
+                const positionTicks = millisecondsToTicks(displayErrorCode.positionMs, streamInfo?.transcodingOffsetTicks || 0);
+                if (positionTicks !== undefined) state.PlayState.PositionTicks = positionTicks;
             }
             if (player.supportsPlaybackLifecycle && displayErrorCode?.mediaState) {
                 const mediaState = displayErrorCode.mediaState;

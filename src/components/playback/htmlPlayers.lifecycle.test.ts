@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Events from '../../utils/events';
 import browser from '../../scripts/browser';
 
-const reports = vi.hoisted(() => ({ stopped: vi.fn(async () => undefined), progress: vi.fn(async () => undefined) }));
+const reports = vi.hoisted(() => ({ stopped: vi.fn(async (info: unknown) => JSON.stringify(info)), progress: vi.fn(async () => undefined) }));
 const registry = vi.hoisted(() => ({ players: [] as unknown[] }));
 vi.mock('../apphost', () => ({ appHost: { supports: () => false } }));
 vi.mock('../alert', () => ({ default: () => undefined }));
@@ -121,6 +121,25 @@ describe('real HTML players and manager execution ownership', () => {
             IsMuted: true, PlaybackRate: 1.5
         }));
         expect(hls.destroy).toHaveBeenCalledOnce();
+        expect(manager.currentItem(player)).toBeNull();
+    });
+
+    it('Video manual stop serializes a paused fractional position as integer ticks', async () => {
+        const { player, manager, start } = fixture('Video');
+        const { element } = await start('manual-stop');
+        element.currentTime = 0.36434;
+        const stopped = vi.fn();
+        Events.on(player, 'stopped', stopped);
+
+        await manager.stop(player);
+
+        expect(stopped).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+            positionMs: 364.34
+        }));
+        expect(reports.stopped).toHaveBeenCalledOnce();
+        const wireBody = await reports.stopped.mock.results[0].value;
+        expect(JSON.parse(wireBody).PositionTicks).toBe(3_643_400);
+        expect(Number.isInteger(JSON.parse(wireBody).PositionTicks)).toBe(true);
         expect(manager.currentItem(player)).toBeNull();
     });
 
