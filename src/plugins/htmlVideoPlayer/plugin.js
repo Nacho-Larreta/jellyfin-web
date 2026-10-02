@@ -13,7 +13,6 @@ import browser from '../../scripts/browser';
 import appSettings from '../../scripts/settings/appSettings';
 import { appHost } from '../../components/apphost';
 import loading from '../../components/loading/loading';
-import dom from '../../utils/dom';
 import { playbackManager } from '../../components/playback/playbackmanager';
 import { appRouter } from '../../components/router/appRouter';
 import {
@@ -143,14 +142,9 @@ function getMediaStreamTextTracks(mediaSource) {
     });
 }
 
-function zoomIn(elem) {
-    return new Promise(resolve => {
-        const duration = 240;
-        elem.style.animation = `htmlvideoplayer-zoomin ${duration}ms ease-in normal`;
-        dom.addEventListener(elem, dom.whichAnimationEvent(), resolve, {
-            once: true
-        });
-    });
+function animateEntrance(elem) {
+    const duration = 240;
+    elem.style.animation = `htmlvideoplayer-zoomin ${duration}ms ease-in normal`;
 }
 
 function normalizeTrackEventText(text, useHtml) {
@@ -1701,9 +1695,7 @@ export class HtmlVideoPlayer {
 
                     // don't animate on smart tv's, too slow
                     if (!browser.slow && browser.supportsCssAnimation()) {
-                        return zoomIn(playerDlg).then(function () {
-                            return videoElement;
-                        });
+                        animateEntrance(playerDlg);
                     }
                 }
 

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Events from '../../utils/events';
+import browser from '../../scripts/browser';
 
 const reports = vi.hoisted(() => ({ stopped: vi.fn(async () => undefined), progress: vi.fn(async () => undefined) }));
 const registry = vi.hoisted(() => ({ players: [] as unknown[] }));
@@ -135,6 +136,32 @@ describe('real HTML players and manager execution ownership', () => {
         expect(next.element.volume).toBe(0.25);
         expect(next.element.muted).toBe(true);
         expect(next.element.playbackRate).toBe(1.25);
+    });
+
+    it('Video assigns its source without waiting for the fullscreen entrance animation', async () => {
+        vi.spyOn(browser, 'supportsCssAnimation').mockReturnValue(true);
+        const { player, manager } = fixture('Video');
+        const streamInfo = { ...options('fullscreen', 'Video'), fullscreen: true };
+        manager.assignPlaybackIdentity(player, streamInfo);
+        player.streamInfo = streamInfo;
+
+        const playing = player.play(streamInfo);
+        await vi.waitFor(() => {
+            const element = document.querySelector<HTMLVideoElement>('video');
+            expect(element).not.toBeNull();
+            expect(document.querySelector<HTMLElement>('.videoPlayerContainer')?.style.animation).toContain('htmlvideoplayer-zoomin');
+            expect(element?.getAttribute('src')).toBe('/same-source');
+        }, { timeout: 1000 });
+        await playing;
+        expect(player.currentSrc()).toBe('/same-source');
+        expect(HTMLMediaElement.prototype.play).toHaveBeenCalledOnce();
+
+        const container = document.querySelector<HTMLElement>('.videoPlayerContainer');
+        if (!container) throw new Error('Real plugin did not create a video container.');
+        container.dispatchEvent(new Event('animationcancel'));
+        container.dispatchEvent(new Event('animationend'));
+        expect(player.currentSrc()).toBe('/same-source');
+        expect(HTMLMediaElement.prototype.play).toHaveBeenCalledOnce();
     });
 
     it('Audio deferred fade only completes its captured generation after a new play', async () => {
