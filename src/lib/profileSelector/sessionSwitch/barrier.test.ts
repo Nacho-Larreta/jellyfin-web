@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { SessionAdmissionBarrier } from './barrier';
 import { SessionSwitchInProgressError, createActiveProfileSession } from './model';
@@ -7,6 +7,37 @@ import { createSessionSwitchEnvelope } from './store';
 const oldSession = createActiveProfileSession('server-1', 'device-1', 'old-user', 'old-token', 4);
 
 describe('SessionAdmissionBarrier', () => {
+    it('notifies after transitions and isolates a failing observer', () => {
+        const barrier = new SessionAdmissionBarrier();
+        const observed = vi.fn(() => barrier.isClosed());
+        barrier.subscribe(() => {
+            throw new Error('observer failure');
+        });
+        const unsubscribe = barrier.subscribe(observed);
+
+        expect(() => barrier.close('switch-1')).not.toThrow();
+        barrier.close('switch-1');
+        expect(observed).toHaveBeenCalledTimes(1);
+
+        barrier.reopen('switch-1');
+        expect(observed).toHaveBeenCalledTimes(2);
+        expect(observed.mock.results.map(result => result.value)).toEqual([ true, false ]);
+        unsubscribe();
+        barrier.synchronize(createSessionSwitchEnvelope(oldSession));
+        expect(observed).toHaveBeenCalledTimes(2);
+    });
+
+    it('notifies terminal synchronization reopening before the later explicit reopen', () => {
+        const barrier = new SessionAdmissionBarrier();
+        const states: boolean[] = [];
+        barrier.subscribe(() => states.push(barrier.isClosed()));
+        barrier.close('switch-1');
+        barrier.synchronize({ ...createSessionSwitchEnvelope(oldSession), marker: null });
+        expect(barrier.admitCurrent('read').snapshot).toEqual(oldSession);
+        barrier.reopen('switch-1');
+
+        expect(states).toEqual([ true, false ]);
+    });
     it('cancels admitted reads and rejects new work after closing admission', () => {
         const barrier = new SessionAdmissionBarrier();
         const read = barrier.admit(oldSession, 'read');

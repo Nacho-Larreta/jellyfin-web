@@ -86,4 +86,68 @@ describe('Utils: events', () => {
             );
         });
     });
+
+    describe('Method: triggerGuarded', () => {
+        it('preserves receiver, arguments, order and the callback snapshot while current', () => {
+            const obj = {};
+            const received: string[] = [];
+            const late = vi.fn();
+            const first = vi.fn(function (this: object, event: { type: string }, value: string) {
+                expect(this).toBe(obj);
+                expect(event).toEqual({ type: 'testEvent' });
+                expect(value).toBe('value');
+                received.push('first');
+                eventsUtils.on(obj, 'testEvent', late);
+                eventsUtils.off(obj, 'testEvent', second);
+            });
+            const second = vi.fn(function (this: object) {
+                expect(this).toBe(obj);
+                received.push('second');
+            });
+            eventsUtils.on(obj, 'testEvent', first);
+            eventsUtils.on(obj, 'testEvent', second);
+
+            eventsUtils.triggerGuarded(obj, 'testEvent', ['value'], () => true);
+
+            expect(received).toEqual(['first', 'second']);
+            expect(late).not.toHaveBeenCalled();
+        });
+
+        it('stops permanently before the next listener when authority is revoked or throws', () => {
+            const obj = {};
+            const second = vi.fn();
+            let current = true;
+            eventsUtils.on(obj, 'testEvent', () => {
+                current = false;
+            });
+            eventsUtils.on(obj, 'testEvent', second);
+
+            eventsUtils.triggerGuarded(obj, 'testEvent', [], () => current);
+            expect(second).not.toHaveBeenCalled();
+
+            current = true;
+            eventsUtils.triggerGuarded(obj, 'testEvent', [], () => {
+                throw new Error('denied');
+            });
+            expect(second).not.toHaveBeenCalled();
+            eventsUtils.trigger(obj, 'testEvent');
+            expect(second).toHaveBeenCalledOnce();
+        });
+
+        it('delivers nothing on initial denial and preserves listener exceptions', () => {
+            const obj = {};
+            const first = vi.fn(() => {
+                throw new Error('listener failure');
+            });
+            const second = vi.fn();
+            eventsUtils.on(obj, 'testEvent', first);
+            eventsUtils.on(obj, 'testEvent', second);
+
+            eventsUtils.triggerGuarded(obj, 'testEvent', [], () => false);
+            expect(first).not.toHaveBeenCalled();
+            expect(() => eventsUtils.triggerGuarded(obj, 'testEvent', [], () => true))
+                .toThrow('listener failure');
+            expect(second).not.toHaveBeenCalled();
+        });
+    });
 });

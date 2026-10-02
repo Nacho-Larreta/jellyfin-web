@@ -1,7 +1,7 @@
 import type { ApiClient } from 'jellyfin-apiclient';
 
-import type { FreshSessionAuthority } from 'lib/profileSelector/sessionSwitch/boundRequests';
-import type { SessionSwitchCompletionReceipt } from 'lib/profileSelector/sessionSwitch/model';
+import type { FreshSessionAuthority } from './boundRequests';
+import type { SessionSwitchCompletionReceipt } from './model';
 
 export interface PublishedAuthority {
     readonly client: ApiClient;

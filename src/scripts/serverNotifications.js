@@ -5,6 +5,8 @@ import { pluginManager } from 'components/pluginManager';
 import { appRouter } from 'components/router/appRouter';
 import toast from 'components/toast/toast';
 import { ServerConnections } from 'lib/jellyfin-apiclient';
+import { getWebSessionSwitchApplication } from 'lib/profileSelector/sessionSwitch/application';
+import { playBoundTrailer } from 'lib/profileSelector/sessionSwitch/remoteTrailer';
 import inputManager from 'scripts/inputManager';
 import Events from 'utils/events.ts';
 import { PluginType } from 'types/plugin.ts';
@@ -24,19 +26,15 @@ function displayMessage(cmd) {
     }
 }
 
-function displayContent(cmd, apiClient) {
+function displayContent(cmd, apiClient, isCurrent) {
     if (!playbackManager.isPlayingLocally(['Video', 'Book'])) {
-        appRouter.showItem(cmd.Arguments.ItemId, apiClient.serverId());
+        if (isCurrent()) appRouter.showItem(cmd.Arguments.ItemId, apiClient.serverId());
     }
 }
 
-function playTrailers(apiClient, itemId) {
-    apiClient.getItem(apiClient.getCurrentUserId(), itemId).then(function (item) {
-        playbackManager.playTrailers(item);
-    });
-}
-
-function processGeneralCommand(cmd, apiClient) {
+function processGeneralCommand(cmd, apiClient, delivery) {
+    const isCurrent = () => delivery?.isCurrent() === true;
+    if (!isCurrent()) return;
     console.debug('Received command: ' + cmd.Name);
     switch (cmd.Name) {
         case 'Select':
@@ -64,7 +62,13 @@ function processGeneralCommand(cmd, apiClient) {
             inputManager.handleCommand('pagedown');
             return;
         case 'PlayTrailers':
-            playTrailers(apiClient, cmd.Arguments.ItemId);
+            void playBoundTrailer(
+                apiClient,
+                cmd.Arguments.ItemId,
+                delivery,
+                client => getWebSessionSwitchApplication(ServerConnections).captureBoundSessionRead(client),
+                item => playbackManager.playTrailers(item)
+            );
             break;
         case 'SetRepeatMode':
             playbackManager.setRepeatMode(cmd.Arguments.RepeatMode);
@@ -95,14 +99,17 @@ function processGeneralCommand(cmd, apiClient) {
             return;
         case 'SetVolume':
             notifyApp();
+            if (!isCurrent()) return;
             playbackManager.setVolume(cmd.Arguments.Volume);
             break;
         case 'SetAudioStreamIndex':
             notifyApp();
+            if (!isCurrent()) return;
             playbackManager.setAudioStreamIndex(parseInt(cmd.Arguments.Index, 10));
             break;
         case 'SetSubtitleStreamIndex':
             notifyApp();
+            if (!isCurrent()) return;
             playbackManager.setSubtitleStreamIndex(parseInt(cmd.Arguments.Index, 10));
             break;
         case 'ToggleFullscreen':
@@ -115,7 +122,7 @@ function processGeneralCommand(cmd, apiClient) {
             inputManager.handleCommand('settings');
             return;
         case 'DisplayContent':
-            displayContent(cmd, apiClient);
+            displayContent(cmd, apiClient, isCurrent);
             break;
         case 'GoToSearch':
             inputManager.handleCommand('search');
@@ -136,16 +143,21 @@ function processGeneralCommand(cmd, apiClient) {
             break;
     }
 
-    notifyApp();
+    if (isCurrent()) notifyApp();
 }
 
-function onMessageReceived(e, msg) {
+function onMessageReceived(e, msg, delivery) {
+    const isCurrent = () => delivery?.isCurrent() === true;
+    if (!isCurrent()) return;
     const apiClient = this;
     const SyncPlay = pluginManager.firstOfType(PluginType.SyncPlay)?.instance;
+    if (!isCurrent()) return;
 
     if (msg.MessageType === 'Play') {
         notifyApp();
+        if (!isCurrent()) return;
         const serverId = apiClient.serverInfo().Id;
+        if (!isCurrent()) return;
         if (msg.Data.PlayCommand === 'PlayNext') {
             playbackManager.queueNext({ ids: msg.Data.ItemIds, serverId: serverId });
         } else if (msg.Data.PlayCommand === 'PlayLast') {
@@ -185,19 +197,20 @@ function onMessageReceived(e, msg) {
         }
     } else if (msg.MessageType === 'GeneralCommand') {
         const cmd = msg.Data;
-        processGeneralCommand(cmd, apiClient);
+        processGeneralCommand(cmd, apiClient, delivery);
     } else if (msg.MessageType === 'UserDataChanged') {
         if (msg.Data.UserId === apiClient.getCurrentUserId()) {
             for (let i = 0, length = msg.Data.UserDataList.length; i < length; i++) {
-                Events.trigger(serverNotifications, 'UserDataChanged', [apiClient, msg.Data.UserDataList[i]]);
+                if (!isCurrent()) break;
+                Events.triggerGuarded(serverNotifications, 'UserDataChanged', [apiClient, msg.Data.UserDataList[i], delivery], isCurrent);
             }
         }
     } else if (msg.MessageType === 'SyncPlayCommand') {
-        SyncPlay?.Manager.processCommand(msg.Data, apiClient);
+        if (isCurrent()) SyncPlay?.Manager.processCommand(msg.Data, apiClient);
     } else if (msg.MessageType === 'SyncPlayGroupUpdate') {
-        SyncPlay?.Manager.processGroupUpdate(msg.Data, apiClient);
-    } else {
-        Events.trigger(serverNotifications, msg.MessageType, [apiClient, msg.Data]);
+        if (isCurrent()) SyncPlay?.Manager.processGroupUpdate(msg.Data, apiClient);
+    } else if (isCurrent()) {
+        Events.triggerGuarded(serverNotifications, msg.MessageType, [apiClient, msg.Data, delivery], isCurrent);
     }
 }
 function bindEvents(apiClient) {

@@ -26,12 +26,15 @@ export class SessionAdmissionBarrier {
     private storageCorrupt = false;
     private readonly activeReads = new Set<AbortController>();
     private readonly activeMutations = new Set<OutstandingMutation>();
+    private readonly observers = new Set<() => void>();
 
     constructor(private readonly createCancellation = createAbortController) {}
 
     synchronize(envelope: SessionEnvelopeObservation): void {
+        const before = this.observedState();
         if (envelope !== null && 'kind' in envelope) {
             this.failClosedForCorruptStorage();
+            this.notifyIfChanged(before);
             return;
         }
 
@@ -45,11 +48,13 @@ export class SessionAdmissionBarrier {
         const switchId = envelope?.marker?.switchId ?? null;
         if (switchId === null) {
             this.closedBySwitchId = null;
+            this.notifyIfChanged(before);
             return;
         }
 
         this.closedBySwitchId = switchId;
         this.cancelActiveReads();
+        this.notifyIfChanged(before);
     }
 
     admitCurrent(kind: SessionWorkKind): SessionWorkLease {
@@ -91,8 +96,10 @@ export class SessionAdmissionBarrier {
             throw new SwitchAlreadyInProgressError(this.closedBySwitchId);
         }
 
+        const before = this.observedState();
         this.closedBySwitchId = switchId;
         this.cancelActiveReads();
+        this.notifyIfChanged(before);
     }
 
     async drainMutations(): Promise<void> {
@@ -104,8 +111,15 @@ export class SessionAdmissionBarrier {
 
     reopen(switchId: string): void {
         if (this.closedBySwitchId === switchId) {
+            const before = this.observedState();
             this.closedBySwitchId = null;
+            this.notifyIfChanged(before);
         }
+    }
+
+    subscribe(listener: () => void): () => void {
+        this.observers.add(listener);
+        return () => this.observers.delete(listener);
     }
 
     isClosed(): boolean {
@@ -133,6 +147,28 @@ export class SessionAdmissionBarrier {
         this.currentSession = null;
         this.closedBySwitchId = 'corrupt-session-storage';
         this.cancelActiveReads();
+    }
+
+    private notifyObservers(): void {
+        this.observers.forEach(observer => {
+            try {
+                observer();
+            } catch {
+                // Admission transitions must not depend on observers.
+            }
+        });
+    }
+
+    private notifyIfChanged(before: string): void {
+        if (before !== this.observedState()) this.notifyObservers();
+    }
+
+    private observedState(): string {
+        return JSON.stringify({
+            closedBySwitchId: this.closedBySwitchId,
+            currentSession: this.currentSession,
+            storageCorrupt: this.storageCorrupt
+        });
     }
 }
 

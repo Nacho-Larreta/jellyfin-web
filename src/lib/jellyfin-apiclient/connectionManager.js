@@ -754,7 +754,12 @@ export default class ConnectionManager {
         });
     }
 
-    handleMessageReceived(msg) {
+    handleMessageReceived(msg, context) {
+        try {
+            if (context && !context.isCurrent()) return;
+        } catch {
+            return;
+        }
         const serverId = msg.ServerId;
         if (serverId) {
             const apiClient = this.getApiClient(serverId);
@@ -767,7 +772,7 @@ export default class ConnectionManager {
                     }
                 }
 
-                apiClient.handleMessageReceived(msg);
+                apiClient.handleMessageReceived(msg, context);
             }
         }
     }

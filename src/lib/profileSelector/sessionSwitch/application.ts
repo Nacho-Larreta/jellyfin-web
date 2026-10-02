@@ -151,6 +151,10 @@ export class WebSessionSwitchApplication {
         return createBoundSessionReadPort(apiClient, this.connections, context.barrier, authority);
     }
 
+    subscribeSessionAdmission(serverId: string, listener: () => void): () => void {
+        return this.getContext(this.createScope(serverId)).barrier.subscribe(listener);
+    }
+
     async bootstrapAuthenticatedSession(
         apiClient: ProfileSwitchApiClient,
         authenticatedUser?: AuthenticatedUser,

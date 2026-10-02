@@ -11,12 +11,6 @@ import { ConnectionState, ServerConnections } from 'lib/jellyfin-apiclient';
 import { getWebSessionSwitchApplication } from 'lib/profileSelector/sessionSwitch/application';
 import type { BoundSessionReadIdentity, FreshSessionAuthority } from 'lib/profileSelector/sessionSwitch/boundRequests';
 import type { SessionSwitchCompletionReceipt } from 'lib/profileSelector/sessionSwitch/model';
-import events from 'utils/events';
-import { toApi } from 'utils/jellyfin-apiclient/compat';
-import { createSessionScopedReadApi, type SessionScopedReadApi } from 'utils/jellyfin-apiclient/sessionReadApi';
-import { type BoundUserViewsRead } from 'utils/jellyfin-apiclient/boundUserViewsQuery';
-import { queryClient } from 'utils/query/queryClient';
-
 import {
     capturePendingOldAuthority,
     matchesCompletion,
@@ -24,7 +18,12 @@ import {
     sameRestoredSession,
     verifiedAuthority,
     type PublishedAuthority
-} from './apiPublicationAuthority';
+} from 'lib/profileSelector/sessionSwitch/publicationAuthority';
+import events from 'utils/events';
+import { toApi } from 'utils/jellyfin-apiclient/compat';
+import { createSessionScopedReadApi, type SessionScopedReadApi } from 'utils/jellyfin-apiclient/sessionReadApi';
+import { type BoundUserViewsRead } from 'utils/jellyfin-apiclient/boundUserViewsQuery';
+import { queryClient } from 'utils/query/queryClient';
 
 export interface JellyfinApiContext {
     __legacyApiClient__?: ApiClient

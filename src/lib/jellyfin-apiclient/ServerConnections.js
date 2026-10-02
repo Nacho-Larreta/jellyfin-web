@@ -16,6 +16,8 @@ import {
     assertSessionEnvelope,
     createOwnerRecoverySession
 } from '../profileSelector/sessionSwitch/model';
+import { getWebSessionSwitchApplication } from '../profileSelector/sessionSwitch/application';
+import { WebSocketSessionAdmission } from '../profileSelector/sessionSwitch/realtimeAdmission';
 
 import ConnectionManager, { revokeSavedSessionAuthority } from './connectionManager';
 
@@ -117,6 +119,10 @@ export class ServerConnections extends ConnectionManager {
         this.stagedSessionBindings = new Map();
         this.loginPublicationQueues = new Map();
         this.localApiClient = null;
+        this.websocketAdmission = new WebSocketSessionAdmission(
+            this,
+            getWebSessionSwitchApplication(this)
+        );
         this.firstConnection = null;
         this.mutateCredentials = mutation => this.mutateCredentialsWithAuthority(mutation);
 
@@ -202,6 +208,13 @@ export class ServerConnections extends ConnectionManager {
         Events.on(this, 'apiclientcreated', (_e, apiClient) => {
             apiClient.getMaxBandwidth = getMaxBandwidth;
             apiClient.normalizeImageOptions = normalizeImageOptions;
+            this.websocketAdmission.register(apiClient);
+        });
+        Events.on(this, 'localusersignedin', () => this.websocketAdmission.signedIn());
+        Events.on(this, 'localusersignedout', () => this.websocketAdmission.signedOut());
+        Events.on(this, 'sessionswitchcompleted', () => this.websocketAdmission.inspect());
+        this._apiClients.forEach(apiClient => {
+            this.websocketAdmission.register(apiClient);
         });
     }
 
@@ -240,6 +253,7 @@ export class ServerConnections extends ConnectionManager {
         if (apiClient) {
             this.localApiClient = apiClient;
             window.ApiClient = apiClient;
+            this.websocketAdmission.register(apiClient);
         }
     }
 
@@ -877,8 +891,8 @@ export class ServerConnections extends ConnectionManager {
             return Promise.reject(new Error(`[ServerConnection] ApiClient not found: ${user.ServerId}`));
         }
 
-        return import('../profileSelector/sessionSwitch/application').then(({ getWebSessionSwitchApplication }) => {
-            return getWebSessionSwitchApplication(this).bootstrapAuthenticatedSession(apiClient, user, authority);
+        return import('../profileSelector/sessionSwitch/application').then(({ getWebSessionSwitchApplication: getApplication }) => {
+            return getApplication(this).bootstrapAuthenticatedSession(apiClient, user, authority);
         });
     }
 
@@ -921,6 +935,7 @@ export class ServerConnections extends ConnectionManager {
         apiClient.enableAutomaticNetworking = false;
         apiClient.manualAddressOnly = true;
         apiClient.serverInfo(serverInfo);
+        this.websocketAdmission.register(apiClient);
         apiClient.setAuthenticationInfo(session.credentialRef.token, session.profileUserId);
         return apiClient;
     }

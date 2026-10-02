@@ -39,7 +39,15 @@ vi.mock('jellyfin-apiclient', () => ({
         ensureWebSocket = vi.fn();
         getCurrentUser = vi.fn();
         getCurrentUserId = vi.fn(() => this.authenticationUserId ?? null);
-        serverInfo = vi.fn();
+        serverAddress = vi.fn(() => this.constructorArgs[0]);
+        serverId = vi.fn(() => this.savedServerInfo?.Id ?? null);
+        serverInfo = vi.fn(function (next) {
+            if (arguments.length > 0) this.savedServerInfo = next;
+            return this.savedServerInfo;
+        });
+        setWebSocketSessionProvider = vi.fn(provider => {
+            this.websocketSessionProvider = provider;
+        });
         setAuthenticationInfo = vi.fn((token, userId) => {
             this.authenticationToken = token;
             this.authenticationUserId = userId;
@@ -878,6 +886,7 @@ describe('ServerConnections session envelope adapter', () => {
             ensureWebSocket: vi.fn(),
             manualAddressOnly: false,
             reportCapabilities: vi.fn(),
+            setWebSocketSessionProvider: vi.fn(),
             serverAddress: () => 'https://server',
             serverId: () => serverInfo.Id,
             serverInfo(next) {
@@ -887,6 +896,7 @@ describe('ServerConnections session envelope adapter', () => {
             setAuthenticationInfo: vi.fn()
         };
         connectionsB.addApiClient(apiClient);
+        expect(apiClient.setWebSocketSessionProvider).toHaveBeenCalledOnce();
         connectionsB.getApiClient = () => apiClient;
         connectionsB.onLocalUserSignedIn = vi.fn().mockResolvedValue(undefined);
 
@@ -1103,13 +1113,17 @@ describe('ServerConnections session envelope adapter', () => {
             closeWebSocket: vi.fn(),
             ensureWebSocket: vi.fn(),
             getCurrentUserId: () => 'old-user',
+            serverId: () => 'server-1',
             serverAddress: () => 'https://jellyfin.example',
             serverInfo: vi.fn(),
+            setWebSocketSessionProvider: vi.fn(),
             setAuthenticationInfo: vi.fn()
         };
         connections._apiClients = [ oldApiClient ];
         connections.getApiClient = vi.fn(() => oldApiClient);
         connections.setLocalApiClient(oldApiClient);
+        expect(oldApiClient.setWebSocketSessionProvider).toHaveBeenCalledOnce();
+        expect(oldApiClient.setWebSocketSessionProvider.mock.calls[0][0]()).toBeNull();
         const constructionCount = constructedApiClients.length;
         const targetSession = createActiveProfileSession(
             'server-1',
@@ -1121,6 +1135,8 @@ describe('ServerConnections session envelope adapter', () => {
 
         connections.installSessionAuthentication(targetSession);
         const isolatedApiClient = constructedApiClients[constructionCount];
+        expect(isolatedApiClient.setWebSocketSessionProvider).toHaveBeenCalledOnce();
+        expect(isolatedApiClient.websocketSessionProvider()).toBeNull();
         isolatedApiClient.getCurrentUser.mockResolvedValue({ Id: 'target-user' });
 
         expect(provider.writes).toHaveLength(0);

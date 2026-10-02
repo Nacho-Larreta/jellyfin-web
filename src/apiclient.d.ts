@@ -69,6 +69,10 @@ declare module 'jellyfin-apiclient' {
     } from '@jellyfin/sdk/lib/generated-client';
     import type { ConnectionState } from 'lib/jellyfin-apiclient';
 
+    interface WebSocketDeliveryContext {
+        isCurrent(): boolean;
+    }
+
     class ApiClient {
         constructor(serverAddress: string, appName: string, appVersion: string, deviceName: string, deviceId: string);
 
@@ -214,7 +218,7 @@ declare module 'jellyfin-apiclient' {
         getUser(userId: string): Promise<UserDto>;
         getUserViews(options?: any, userId: string): Promise<BaseItemDtoQueryResult>;
         getVirtualFolders(): Promise<VirtualFolderInfo[]>;
-        handleMessageReceived(msg: any): void;
+        handleMessageReceived(msg: any, context?: WebSocketDeliveryContext): void;
         installPlugin(name: string, guid: string, version?: string): Promise<void>;
         isLoggedIn(): boolean;
         isMessageChannelOpen(): boolean;
@@ -229,6 +233,8 @@ declare module 'jellyfin-apiclient' {
         markPlayed(userId: string, itemId: string, date: Date): Promise<UserItemDataDto>;
         markUnplayed(userId: string, itemId: string, date: Date): Promise<UserItemDataDto>;
         openWebSocket(): void;
+        captureMessageDelivery(): WebSocketDeliveryContext | null;
+        setWebSocketSessionProvider(captureSession: (() => WebSocketDeliveryContext | null) | null): void;
         quickConnect(secret: string): Promise<AuthenticationResult>;
         refreshItem(itemId: string, options?: any): Promise<void>;
         removeMediaPath(virtualFolderName: string, mediaPath: string, refreshLibrary?: boolean): Promise<void>;
@@ -331,7 +337,7 @@ declare module 'jellyfin-apiclient' {
         getAvailableServers(): any[];
         getOrCreateApiClient(serverId: string): ApiClient;
         getSavedServers(): any[];
-        handleMessageReceived(msg: any): void;
+        handleMessageReceived(msg: any, context?: WebSocketDeliveryContext): void;
         logout(): Promise<void>;
         minServerVersion(val?: string): string;
         updateSavedServerId(server: any): Promise<void>;

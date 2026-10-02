@@ -45,6 +45,19 @@ export default {
             .forEach(callback => {
                 callback.apply(obj, eventArgs);
             });
+    },
+
+    triggerGuarded(obj: any, type: string, args: any[], isCurrent: () => boolean): void {
+        const eventArgs: [Event, ...any] = [{ type }, ...args];
+        const callbacks = getCallbacks(obj, type).slice(0);
+        for (const callback of callbacks) {
+            try {
+                if (isCurrent() !== true) return;
+            } catch {
+                return;
+            }
+            callback.apply(obj, eventArgs);
+        }
     }
 };
 /* eslint-enable @typescript-eslint/no-explicit-any */
