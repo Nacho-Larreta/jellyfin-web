@@ -39,7 +39,6 @@ const QuickConnectPage: FC = () => {
 
         const userId = searchParams.get('userId') ?? user?.Id;
         const normalizedCode = code.replace(/\s/g, '');
-        console.log('[QuickConnect] authorizing code %s as user %s', normalizedCode, userId);
 
         getQuickConnectApi(api)
             .authorizeQuickConnect({
