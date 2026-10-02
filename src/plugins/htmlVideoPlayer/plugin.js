@@ -44,6 +44,7 @@ import { PluginType } from '../../types/plugin.ts';
 import Events from '../../utils/events.ts';
 import { includesAny } from '../../utils/container.ts';
 import { isHls } from '../../utils/mediaSource.ts';
+import { beginMediaPlayback, bindMediaPlayback, captureMediaSettings, mediaPlaybackFor, ownsMediaPlayback, restoreMediaSettings } from '../../components/htmlMediaLifecycle';
 
 /**
  * Returns resolved URL.
@@ -321,6 +322,7 @@ export class HtmlVideoPlayer {
     #lastProfile;
 
     constructor() {
+        this.supportsPlaybackLifecycle = true;
         if (browser.edgeUwp) {
             this.name = 'Windows Video Player';
         } else {
@@ -394,6 +396,9 @@ export class HtmlVideoPlayer {
     }
 
     async play(options) {
+        const settings = captureMediaSettings(this.#mediaElement);
+        const playback = beginMediaPlayback(this, options);
+        this.retireMediaElement();
         this.#started = false;
         this.#timeUpdated = false;
 
@@ -401,10 +406,14 @@ export class HtmlVideoPlayer {
 
         if (options.resetSubtitleOffset !== false) this.resetSubtitleOffset();
 
-        const elem = await this.createMediaElement(options);
+        const elem = await this.createMediaElement(options, playback);
+        if (!ownsMediaPlayback(this, playback)) return;
+        bindMediaPlayback(playback, elem);
+        restoreMediaSettings(elem, settings);
         this.#applyAspectRatio(options.aspectRatio || this.getAspectRatio());
 
         await this.updateVideoUrl(options);
+        if (!ownsMediaPlayback(this, playback)) return;
         return this.setCurrentSrc(elem, options);
     }
 
@@ -412,7 +421,9 @@ export class HtmlVideoPlayer {
      * @private
      */
     setSrcWithFlvJs(elem, options, url) {
+        const playback = mediaPlaybackFor(elem);
         return import('flv.js').then(({ default: flvjs }) => {
+            if (!ownsMediaPlayback(this, playback)) return;
             const flvPlayer = flvjs.createPlayer({
                 type: 'flv',
                 url: url
@@ -438,6 +449,7 @@ export class HtmlVideoPlayer {
      * @private
      */
     setSrcWithHlsJs(elem, options, url) {
+        const playback = mediaPlaybackFor(elem);
         return new Promise((resolve, reject) => {
             requireHlsPlayer(async () => {
                 let maxBufferLength = 30;
@@ -451,6 +463,7 @@ export class HtmlVideoPlayer {
                 }
 
                 const includeCorsCredentials = await getIncludeCorsCredentials();
+                if (!ownsMediaPlayback(this, playback)) return resolve();
 
                 const hls = new Hls({
                     startPosition: options.playerStartPositionTicks / 10000000,
@@ -479,6 +492,8 @@ export class HtmlVideoPlayer {
      * @private
      */
     async setCurrentSrc(elem, options) {
+        const playback = mediaPlaybackFor(elem);
+        if (!ownsMediaPlayback(this, playback)) return;
         elem.removeEventListener('error', this.onError);
 
         let val = options.url;
@@ -540,12 +555,14 @@ export class HtmlVideoPlayer {
             elem.autoplay = true;
 
             const includeCorsCredentials = await getIncludeCorsCredentials();
+            if (!ownsMediaPlayback(this, playback)) return;
             if (includeCorsCredentials) {
                 // Safari will not send cookies without this
                 elem.crossOrigin = 'use-credentials';
             }
 
             return applySrc(elem, val, options).then(() => {
+                if (!ownsMediaPlayback(this, playback)) return;
                 this.#currentSrc = val;
 
                 return playWithPromise(elem, this.onError);
@@ -835,13 +852,10 @@ export class HtmlVideoPlayer {
                 elem.pause();
             }
 
-            onEndedInternal(this, elem, this.onError);
-        }
-
-        this.destroyCustomTrack(elem);
-
-        if (destroyPlayer) {
-            this.destroy();
+            onEndedInternal(this, elem, this.onError, () => {
+                if (destroyPlayer) this.destroy();
+                else this.retireMediaElement();
+            });
         }
 
         return Promise.resolve();
@@ -856,27 +870,7 @@ export class HtmlVideoPlayer {
         setBackdropTransparency(TRANSPARENCY_LEVEL.None);
         document.body.classList.remove('hide-scroll');
 
-        const videoElement = this.#mediaElement;
-
-        if (videoElement) {
-            this.#mediaElement = null;
-
-            this.destroyCustomTrack(videoElement);
-            videoElement.removeEventListener('timeupdate', this.onTimeUpdate);
-            videoElement.removeEventListener('ended', this.onEnded);
-            videoElement.removeEventListener('volumechange', this.onVolumeChange);
-            videoElement.removeEventListener('pause', this.onPause);
-            videoElement.removeEventListener('playing', this.onPlaying);
-            videoElement.removeEventListener('play', this.onPlay);
-            videoElement.removeEventListener('click', this.onClick);
-            videoElement.removeEventListener('dblclick', this.onDblClick);
-            videoElement.removeEventListener('waiting', this.onWaiting);
-            videoElement.removeEventListener('error', this.onError); // bound in htmlMediaHelper
-
-            resetSrc(videoElement);
-
-            videoElement.parentNode.removeChild(videoElement);
-        }
+        this.retireMediaElement();
 
         const dlg = this.#videoDialog;
         if (dlg) {
@@ -892,6 +886,34 @@ export class HtmlVideoPlayer {
         }
     }
 
+    retireMediaElement() {
+        const elem = this.#mediaElement;
+        if (!elem) return;
+        this.#mediaElement = null;
+        this.#currentSrc = undefined;
+        this.#currentTime = null;
+        this._currentPlayOptions = null;
+        this.destroyCustomTrack(elem);
+        destroyHlsPlayer(this);
+        destroyFlvPlayer(this);
+        destroyCastPlayer(this);
+        this.bindMediaEvents(elem, false);
+        elem.removeEventListener('error', this.onError);
+        elem.pause();
+        resetSrc(elem);
+        elem.remove();
+    }
+
+    bindMediaEvents(elem, bind = true) {
+        const method = bind ? 'addEventListener' : 'removeEventListener';
+        for (const [name, handler] of [
+            ['timeupdate', this.onTimeUpdate], ['ended', this.onEnded],
+            ['volumechange', this.onVolumeChange], ['pause', this.onPause],
+            ['playing', this.onPlaying], ['play', this.onPlay],
+            ['click', this.onClick], ['dblclick', this.onDblClick], ['waiting', this.onWaiting]
+        ]) elem[method](name, handler);
+    }
+
     /**
      * @private
      * @param e {Event} The event received from the `<video>` element
@@ -901,8 +923,7 @@ export class HtmlVideoPlayer {
          * @type {HTMLMediaElement}
          */
         const elem = e.target;
-        this.destroyCustomTrack(elem);
-        onEndedInternal(this, elem, this.onError);
+        onEndedInternal(this, elem, this.onError, () => this.retireMediaElement());
     };
 
     /**
@@ -910,6 +931,7 @@ export class HtmlVideoPlayer {
      * @param e {Event} The event received from the `<video>` element
      */
     onTimeUpdate = (e) => {
+        if (!ownsMediaPlayback(this, mediaPlaybackFor(e.target))) return;
         /**
          * @type {HTMLMediaElement}
          */
@@ -940,6 +962,7 @@ export class HtmlVideoPlayer {
      * @param e {Event} The event received from the `<video>` element
      */
     onVolumeChange = (e) => {
+        if (!ownsMediaPlayback(this, mediaPlaybackFor(e.target))) return;
         /**
          * @type {HTMLMediaElement}
          */
@@ -987,6 +1010,7 @@ export class HtmlVideoPlayer {
      * @param e {Event} The event received from the `<video>` element
      */
     onPlaying = (e) => {
+        if (!ownsMediaPlayback(this, mediaPlaybackFor(e.target))) return;
         /**
          * @type {HTMLMediaElement}
          */
@@ -1020,7 +1044,8 @@ export class HtmlVideoPlayer {
     /**
      * @private
      */
-    onPlay = () => {
+    onPlay = (e) => {
+        if (!ownsMediaPlayback(this, mediaPlaybackFor(e.target))) return;
         Events.trigger(this, 'unpause');
     };
 
@@ -1060,11 +1085,13 @@ export class HtmlVideoPlayer {
     /**
      * @private
      */
-    onPause = () => {
+    onPause = (e) => {
+        if (!ownsMediaPlayback(this, mediaPlaybackFor(e.target))) return;
         Events.trigger(this, 'pause');
     };
 
-    onWaiting = () => {
+    onWaiting = (e) => {
+        if (!ownsMediaPlayback(this, mediaPlaybackFor(e.target))) return;
         Events.trigger(this, 'waiting');
     };
 
@@ -1073,6 +1100,7 @@ export class HtmlVideoPlayer {
      * @param e {Event} The event received from the `<video>` element
      */
     onError = (e) => {
+        if (!ownsMediaPlayback(this, mediaPlaybackFor(e.target))) return;
         /**
          * @type {HTMLMediaElement}
          */
@@ -1609,11 +1637,12 @@ export class HtmlVideoPlayer {
     /**
      * @private
      */
-    createMediaElement(options) {
+    createMediaElement(options, playback) {
         const dlg = document.querySelector('.videoPlayerContainer');
 
         if (!dlg) {
             return import('./style.scss').then(() => {
+                if (!ownsMediaPlayback(this, playback)) return;
                 if (options.fullscreen) loading.show();
 
                 const playerDlg = document.createElement('div');
@@ -1647,15 +1676,7 @@ export class HtmlVideoPlayer {
                     videoElement.volume = getSavedVolume();
                 }
 
-                videoElement.addEventListener('timeupdate', this.onTimeUpdate);
-                videoElement.addEventListener('ended', this.onEnded);
-                videoElement.addEventListener('volumechange', this.onVolumeChange);
-                videoElement.addEventListener('pause', this.onPause);
-                videoElement.addEventListener('playing', this.onPlaying);
-                videoElement.addEventListener('play', this.onPlay);
-                videoElement.addEventListener('click', this.onClick);
-                videoElement.addEventListener('dblclick', this.onDblClick);
-                videoElement.addEventListener('waiting', this.onWaiting);
+                this.bindMediaEvents(videoElement);
                 if (options.backdropUrl) {
                     videoElement.poster = options.backdropUrl;
                 }
@@ -1701,7 +1722,17 @@ export class HtmlVideoPlayer {
                 }
             }
 
-            const videoElement = dlg.querySelector('video');
+            const videoElement = document.createElement('video');
+            videoElement.className = 'htmlvideoplayer';
+            videoElement.preload = browser.web0s ? 'auto' : 'metadata';
+            videoElement.autoplay = true;
+            videoElement.controls = !appHost.supports(AppFeature.HtmlVideoAutoplay);
+            videoElement.setAttribute('webkit-playsinline', '');
+            videoElement.setAttribute('playsinline', '');
+            if (!appHost.supports(AppFeature.PhysicalVolumeControl)) videoElement.volume = getSavedVolume();
+            this.bindMediaEvents(videoElement);
+            dlg.appendChild(videoElement);
+            this.#mediaElement = videoElement;
             if (options.backdropUrl) {
                 // update backdrop image
                 videoElement.poster = options.backdropUrl;

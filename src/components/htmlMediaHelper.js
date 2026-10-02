@@ -2,6 +2,7 @@ import appSettings from '../scripts/settings/appSettings' ;
 import browser from '../scripts/browser';
 import Events from '../utils/events.ts';
 import { MediaError } from 'types/mediaError';
+import { finishMediaPlayback, mediaPlaybackFor, ownsMediaPlayback } from './htmlMediaLifecycle';
 
 export function getSavedVolume() {
     return appSettings.get('volume') || 1;
@@ -260,7 +261,9 @@ export function destroyFlvPlayer(instance) {
 }
 
 export function bindEventsToHlsPlayer(instance, hls, elem, onErrorFn, resolve, reject) {
+    const playback = mediaPlaybackFor(elem);
     hls.on(Hls.Events.MANIFEST_PARSED, function () {
+        if (playback && !ownsMediaPlayback(instance, playback)) return resolve();
         playWithPromise(elem, onErrorFn).then(resolve, function () {
             if (reject) {
                 reject();
@@ -270,6 +273,7 @@ export function bindEventsToHlsPlayer(instance, hls, elem, onErrorFn, resolve, r
     });
 
     hls.on(Hls.Events.ERROR, function (event, data) {
+        if (playback && !ownsMediaPlayback(instance, playback)) return resolve();
         console.error('HLS Error: Type: ' + data.type + ' Details: ' + (data.details || '') + ' Fatal: ' + (data.fatal || false));
 
         // try to recover network error
@@ -339,7 +343,25 @@ export function bindEventsToHlsPlayer(instance, hls, elem, onErrorFn, resolve, r
     });
 }
 
-export function onEndedInternal(instance, elem, onErrorFn) {
+export function onEndedInternal(instance, elem, onErrorFn, cleanup) {
+    const playback = mediaPlaybackFor(elem);
+    if (playback?.ended) return;
+    if (playback && !finishMediaPlayback(instance, playback)) {
+        Events.trigger(instance, 'stopped', [{ playbackIdentity: playback.identity }]);
+        return;
+    }
+    const stopInfo = {
+        src: instance._currentSrc,
+        playbackIdentity: playback?.identity,
+        positionMs: typeof instance.currentTime === 'function' ? instance.currentTime() : undefined,
+        mediaState: {
+            volumeLevel: instance.getVolume?.(),
+            isMuted: instance.isMuted?.(),
+            isPaused: instance.paused?.(),
+            playbackRate: instance.getPlaybackRate?.(),
+            bufferedRanges: instance.getBufferedRanges?.()
+        }
+    };
     elem.removeEventListener('error', onErrorFn);
 
     resetSrc(elem);
@@ -348,15 +370,12 @@ export function onEndedInternal(instance, elem, onErrorFn) {
     destroyFlvPlayer(instance);
     destroyCastPlayer(instance);
 
-    const stopInfo = {
-        src: instance._currentSrc
-    };
-
-    Events.trigger(instance, 'stopped', [stopInfo]);
-
     instance._currentTime = null;
     instance._currentSrc = null;
     instance._currentPlayOptions = null;
+    cleanup?.();
+
+    Events.trigger(instance, 'stopped', [stopInfo]);
 }
 
 export function getBufferedRanges(instance, elem) {

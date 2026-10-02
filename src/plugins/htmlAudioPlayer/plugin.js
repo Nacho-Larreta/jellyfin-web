@@ -8,13 +8,14 @@ import profileBuilder from '../../scripts/browserDeviceProfile';
 import { getIncludeCorsCredentials } from '../../scripts/settings/webSettings';
 import { PluginType } from '../../types/plugin.ts';
 import Events from '../../utils/events.ts';
+import { beginMediaPlayback, bindMediaPlayback, captureMediaSettings, mediaPlaybackFor, ownsMediaPlayback, restoreMediaSettings } from '../../components/htmlMediaLifecycle';
 
 function getDefaultProfile() {
     return profileBuilder({});
 }
 
-let fadeTimeout;
-function fade(instance, elem, startingVolume) {
+function fade(instance, elem, startingVolume, playback) {
+    if (!ownsMediaPlayback(instance, playback)) return Promise.resolve();
     instance._isFadingOut = true;
 
     // Need to record the starting volume on each pass rather than querying elem.volume
@@ -29,19 +30,10 @@ function fade(instance, elem, startingVolume) {
     }
 
     return new Promise(function (resolve, reject) {
-        cancelFadeTimeout();
-        fadeTimeout = setTimeout(function () {
-            fade(instance, elem, newVolume).then(resolve, reject);
+        setTimeout(function () {
+            fade(instance, elem, newVolume, playback).then(resolve, reject);
         }, 100);
     });
-}
-
-function cancelFadeTimeout() {
-    const timeout = fadeTimeout;
-    if (timeout) {
-        clearTimeout(timeout);
-        fadeTimeout = null;
-    }
 }
 
 function supportsFade() {
@@ -94,27 +86,35 @@ class HtmlAudioPlayer {
         self.name = 'Html Audio Player';
         self.type = PluginType.MediaPlayer;
         self.id = 'htmlaudioplayer';
+        self.supportsPlaybackLifecycle = true;
 
         // Let any players created by plugins take priority
         self.priority = 1;
 
         self.play = function (options) {
+            const settings = captureMediaSettings(self._mediaElement);
+            const playback = beginMediaPlayback(self, options);
+            self.destroy();
             self._started = false;
             self._timeUpdated = false;
             self._currentTime = null;
+            self._isFadingOut = false;
 
             const elem = createMediaElement();
+            bindMediaPlayback(playback, elem);
+            restoreMediaSettings(elem, settings);
 
-            return setCurrentSrc(elem, options);
+            return setCurrentSrc(elem, options, playback);
         };
 
-        function setCurrentSrc(elem, options) {
+        function setCurrentSrc(elem, options, playback) {
             unBindEvents(elem);
             bindEvents(elem);
 
             let val = options.url;
             console.debug('playing url: ' + val);
             import('../../scripts/settings/userSettings').then((userSettings) => {
+                if (!ownsMediaPlayback(self, playback)) return;
                 let normalizationGain;
                 if (userSettings.selectAudioNormalization() == 'TrackGain') {
                     normalizationGain = options.item.NormalizationGain
@@ -168,6 +168,7 @@ class HtmlAudioPlayer {
                 return new Promise(function (resolve, reject) {
                     requireHlsPlayer(async () => {
                         const includeCorsCredentials = await getIncludeCorsCredentials();
+                        if (!ownsMediaPlayback(self, playback)) return resolve();
 
                         const hls = new Hls({
                             manifestLoadingTimeOut: 20000,
@@ -189,12 +190,14 @@ class HtmlAudioPlayer {
                 elem.autoplay = true;
 
                 const includeCorsCredentials = await getIncludeCorsCredentials();
+                if (!ownsMediaPlayback(self, playback)) return;
                 if (includeCorsCredentials) {
                     // Safari will not send cookies without this
                     elem.crossOrigin = 'use-credentials';
                 }
 
                 return htmlMediaHelper.applySrc(elem, val, options).then(function () {
+                    if (!ownsMediaPlayback(self, playback)) return;
                     self._currentSrc = val;
 
                     return htmlMediaHelper.playWithPromise(elem, onError);
@@ -224,42 +227,53 @@ class HtmlAudioPlayer {
         }
 
         self.stop = function (destroyPlayer) {
-            cancelFadeTimeout();
-
             const elem = self._mediaElement;
             const src = self._currentSrc;
+            const playback = mediaPlaybackFor(elem);
+            if (!playback || playback.ended) return Promise.resolve();
+            if (playback.stopPromise) return playback.stopPromise;
 
             if (elem && src) {
                 if (!destroyPlayer || !supportsFade()) {
                     elem.pause();
-
-                    htmlMediaHelper.onEndedInternal(self, elem, onError);
-
-                    if (destroyPlayer) {
-                        self.destroy();
-                    }
+                    htmlMediaHelper.onEndedInternal(self, elem, onError, self.destroy);
                     return Promise.resolve();
                 }
 
                 const originalVolume = elem.volume;
+                playback.restoreVolume = originalVolume;
 
-                return fade(self, elem, elem.volume).then(function () {
-                    elem.pause();
-                    elem.volume = originalVolume;
-
-                    htmlMediaHelper.onEndedInternal(self, elem, onError);
-
-                    if (destroyPlayer) {
-                        self.destroy();
+                playback.stopPromise = fade(self, elem, elem.volume, playback).then(function () {
+                    if (ownsMediaPlayback(self, playback)) {
+                        elem.pause();
+                        elem.volume = originalVolume;
+                        self._isFadingOut = false;
                     }
+                    htmlMediaHelper.onEndedInternal(self, elem, onError, self.destroy);
                 });
+                return playback.stopPromise;
             }
             return Promise.resolve();
         };
 
         self.destroy = function () {
-            unBindEvents(self._mediaElement);
-            htmlMediaHelper.resetSrc(self._mediaElement);
+            const elem = self._mediaElement;
+            if (!elem) return;
+            self._mediaElement = null;
+            self._currentSrc = null;
+            self._currentPlayOptions = null;
+            self._currentTime = null;
+            self._isFadingOut = false;
+            unBindEvents(elem);
+            elem.pause();
+            htmlMediaHelper.resetSrc(elem);
+            elem.remove();
+            htmlMediaHelper.destroyHlsPlayer(self);
+            self.gainNode?.disconnect();
+            self.gainNode = null;
+            const audioContext = self._audioContext;
+            self._audioContext = null;
+            audioContext?.close().catch(error => console.warn('Unable to close retired audio context', error));
         };
 
         function createMediaElement() {
@@ -269,15 +283,10 @@ class HtmlAudioPlayer {
                 return elem;
             }
 
-            elem = document.querySelector('.mediaPlayerAudio');
-
-            if (!elem) {
-                elem = document.createElement('audio');
-                elem.classList.add('mediaPlayerAudio');
-                elem.classList.add('hide');
-
-                document.body.appendChild(elem);
-            }
+            elem = document.createElement('audio');
+            elem.classList.add('mediaPlayerAudio');
+            elem.classList.add('hide');
+            document.body.appendChild(elem);
 
             // TODO: Move volume control to PlaybackManager. Player should just be a wrapper that translates commands into API calls.
             if (!appHost.supports(AppFeature.PhysicalVolumeControl)) {
@@ -294,6 +303,7 @@ class HtmlAudioPlayer {
                 const AudioContext = window.AudioContext || window.webkitAudioContext; /* eslint-disable-line compat/compat */
 
                 const audioCtx = new AudioContext();
+                self._audioContext = audioCtx;
                 const source = audioCtx.createMediaElementSource(elem);
 
                 const gainNode = audioCtx.createGain();
@@ -308,10 +318,11 @@ class HtmlAudioPlayer {
         }
 
         function onEnded() {
-            htmlMediaHelper.onEndedInternal(self, this, onError);
+            htmlMediaHelper.onEndedInternal(self, this, onError, self.destroy);
         }
 
         function onTimeUpdate() {
+            if (!ownsMediaPlayback(self, mediaPlaybackFor(this))) return;
             // Get the player position + the transcoding offset
             const time = this.currentTime;
 
@@ -323,6 +334,7 @@ class HtmlAudioPlayer {
         }
 
         function onVolumeChange() {
+            if (!ownsMediaPlayback(self, mediaPlaybackFor(this))) return;
             if (!self._isFadingOut) {
                 htmlMediaHelper.saveVolume(this.volume);
                 if (browser.safari && self.gainNode) {
@@ -333,6 +345,7 @@ class HtmlAudioPlayer {
         }
 
         function onPlaying(e) {
+            if (!ownsMediaPlayback(self, mediaPlaybackFor(this))) return;
             if (!self._started) {
                 self._started = true;
                 this.removeAttribute('controls');
@@ -343,18 +356,22 @@ class HtmlAudioPlayer {
         }
 
         function onPlay() {
+            if (!ownsMediaPlayback(self, mediaPlaybackFor(this))) return;
             Events.trigger(self, 'unpause');
         }
 
         function onPause() {
+            if (!ownsMediaPlayback(self, mediaPlaybackFor(this))) return;
             Events.trigger(self, 'pause');
         }
 
         function onWaiting() {
+            if (!ownsMediaPlayback(self, mediaPlaybackFor(this))) return;
             Events.trigger(self, 'waiting');
         }
 
         function onError() {
+            if (!ownsMediaPlayback(self, mediaPlaybackFor(this))) return;
             const errorCode = this.error ? (this.error.code || 0) : 0;
             const errorMessage = this.error ? (this.error.message || '') : '';
             console.error('media element error: ' + errorCode.toString() + ' ' + errorMessage);

@@ -79,6 +79,7 @@
   "dependencies": {
     "@emotion/react": "11.14.0",
     "@emotion/styled": "11.14.1",
+    "@noble/hashes": "1.4.0",
     "@fontsource/noto-sans": "5.2.10",
     "@fontsource/noto-sans-hk": "5.2.9",
     "@fontsource/noto-sans-jp": "5.2.9",

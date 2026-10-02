@@ -32,6 +32,7 @@ import { MediaError } from 'types/mediaError';
 import { getMediaError } from 'utils/mediaError';
 import { toApi } from 'utils/jellyfin-apiclient/compat';
 import { bindSkipSegment } from './skipsegment.ts';
+import { createPlaybackIdentity, samePlaybackIdentity } from '../htmlMediaLifecycle';
 
 const UNLIMITED_ITEMS = -1;
 
@@ -92,10 +93,10 @@ function reportPlayback(playbackManagerInstance, state, player, reportPlaylist, 
     }
 
     const apiClient = ServerConnections.getApiClient(serverId);
-    const reportPlaybackPromise = apiClient[method](info);
+    const reportPlaybackPromise = playbackManagerInstance.trackProfileSwitchReport(player, apiClient[method](info));
     // Notify that report has been sent
-    reportPlaybackPromise.then(() => {
-        Events.trigger(playbackManagerInstance, 'reportplayback', [true]);
+    reportPlaybackPromise.then(acknowledged => {
+        if (acknowledged) Events.trigger(playbackManagerInstance, 'reportplayback', [true]);
     });
 }
 
@@ -716,6 +717,12 @@ export class PlaybackManager {
         let currentPairingId = null;
 
         this._playNextAfterEnded = true;
+        this._profileSwitchStops = new WeakMap();
+        this._profileSwitchLateStops = new WeakMap();
+        this._profileSwitchCleanedPlayers = new WeakSet();
+        this._profileSwitchPendingWork = 0;
+        this._profileSwitchPendingReports = 0;
+        this._profileSwitchReportFailures = new Set();
         const playerStates = {};
 
         this._playQueueManager = new PlayQueueManager();
@@ -1333,15 +1340,15 @@ export class PlaybackManager {
                 getPlayerData(player).audioStreamIndex = index;
             } else {
                 // See if the player supports the track without transcoding
-                player.getDeviceProfile(self.currentItem(player)).then(function (profile) {
+                return self.trackProfileSwitchPlaybackWork(() => player.getDeviceProfile(self.currentItem(player)).then(function (profile) {
                     if (isAudioStreamSupported(self.currentMediaSource(player), index, profile)) {
                         player.setAudioStreamIndex(index);
                         getPlayerData(player).audioStreamIndex = index;
                     } else {
-                        changeStream(player, getCurrentTicks(player), { AudioStreamIndex: index });
                         getPlayerData(player).audioStreamIndex = index;
+                        return changeStream(player, getCurrentTicks(player), { AudioStreamIndex: index });
                     }
-                });
+                }));
             }
         };
 
@@ -1399,7 +1406,7 @@ export class PlaybackManager {
 
             const apiClient = ServerConnections.getApiClient(self.currentItem(player).ServerId);
 
-            apiClient.getEndpointInfo().then(function (endpointInfo) {
+            return self.trackProfileSwitchPlaybackWork(() => apiClient.getEndpointInfo().then(function (endpointInfo) {
                 const playerData = getPlayerData(player);
                 const mediaType = playerData.streamInfo ? playerData.streamInfo.mediaType : null;
 
@@ -1412,14 +1419,14 @@ export class PlaybackManager {
                     promise = Promise.resolve(options.maxBitrate);
                 }
 
-                promise.then(function (bitrate) {
+                return promise.then(function (bitrate) {
                     appSettings.maxStreamingBitrate(endpointInfo.IsInNetwork, mediaType, bitrate);
 
-                    changeStream(player, getCurrentTicks(player), {
+                    return changeStream(player, getCurrentTicks(player), {
                         MaxStreamingBitrate: bitrate
                     });
                 });
-            });
+            }));
         };
 
         self.isFullscreen = function (player) {
@@ -1693,6 +1700,11 @@ export class PlaybackManager {
         }
 
         function changeStream(player, ticks, params) {
+            self._profileSwitchCleanedPlayers.delete(player);
+            return self.trackProfileSwitchPlaybackWork(() => changePlaybackStream(player, ticks, params));
+        }
+
+        function changePlaybackStream(player, ticks, params) {
             if (canPlayerSeek(player) && params == null) {
                 player.currentTime(parseInt(ticks / 10000, 10));
                 return;
@@ -1707,7 +1719,7 @@ export class PlaybackManager {
 
             const currentItem = self.currentItem(player);
 
-            player.getDeviceProfile(currentItem, {
+            return player.getDeviceProfile(currentItem, {
                 isRetry: params.EnableDirectPlay === false
             }).then(function (deviceProfile) {
                 const audioStreamIndex = params.AudioStreamIndex == null ? getPlayerData(player).audioStreamIndex : params.AudioStreamIndex;
@@ -1737,7 +1749,7 @@ export class PlaybackManager {
                     allowAudioStreamCopy: params.AllowAudioStreamCopy
                 };
 
-                getPlaybackInfo(player, apiClient, currentItem, deviceProfile, currentMediaSource.Id, liveStreamId, options).then(function (result) {
+                return getPlaybackInfo(player, apiClient, currentItem, deviceProfile, currentMediaSource.Id, liveStreamId, options).then(function (result) {
                     if (validatePlaybackInfoResult(self, result)) {
                         currentMediaSource = result.MediaSources[0];
 
@@ -1757,7 +1769,7 @@ export class PlaybackManager {
                         getPlayerData(player).audioStreamIndex = audioStreamIndex;
                         getPlayerData(player).maxStreamingBitrate = maxBitrate;
 
-                        changeStreamToUrl(apiClient, player, playSessionId, streamInfo);
+                        return changeStreamToUrl(apiClient, player, playSessionId, streamInfo);
                     }
                 });
             });
@@ -1769,30 +1781,34 @@ export class PlaybackManager {
             playerData.isChangingStream = true;
 
             if (playerData.streamInfo && playSessionId) {
-                apiClient.stopActiveEncodings(playSessionId).then(function () {
+                return apiClient.stopActiveEncodings(playSessionId).then(function () {
                     // Stop the first transcoding afterwards because the player may still send requests to the original url
                     const afterSetSrc = function () {
-                        apiClient.stopActiveEncodings(playSessionId);
+                        return apiClient.stopActiveEncodings(playSessionId);
                     };
-                    setSrcIntoPlayer(apiClient, player, streamInfo).then(afterSetSrc, afterSetSrc);
+                    return setSrcIntoPlayer(apiClient, player, streamInfo).then(afterSetSrc, afterSetSrc);
                 });
             } else {
-                setSrcIntoPlayer(apiClient, player, streamInfo);
+                return setSrcIntoPlayer(apiClient, player, streamInfo);
             }
         }
 
         function setSrcIntoPlayer(apiClient, player, streamInfo) {
+            self._profileSwitchCleanedPlayers.delete(player);
             const playerData = getPlayerData(player);
 
             playerData.streamInfo = streamInfo;
+            self.assignPlaybackIdentity(player, streamInfo);
 
             return player.play(streamInfo).then(function () {
+                if (!self.isCurrentPlaybackExecution(player, streamInfo)) return;
                 playerData.isChangingStream = false;
                 streamInfo.started = true;
                 streamInfo.ended = false;
 
                 sendProgressUpdate(player, 'timeupdate');
             }, function (e) {
+                if (!self.isCurrentPlaybackExecution(player, streamInfo)) return;
                 playerData.isChangingStream = false;
 
                 onPlaybackError.call(player, e, {
@@ -2083,7 +2099,9 @@ export class PlaybackManager {
         self.translateItemsForPlayback = translateItemsForPlayback;
         self.getItemsForPlayback = getItemsForPlayback;
 
-        self.play = async function (options) {
+        self.play = options => self.trackProfileSwitchPlaybackWork(() => play(options));
+
+        async function play(options) {
             normalizePlayOptions(options);
 
             if (self._currentPlayer) {
@@ -2129,7 +2147,7 @@ export class PlaybackManager {
             items = items.flat();
 
             return playWithIntros(items, options);
-        };
+        }
 
         function getPlayerData(player) {
             if (!player) {
@@ -2264,6 +2282,7 @@ export class PlaybackManager {
 
             options.items = items;
 
+            self._profileSwitchCleanedPlayers.delete(player);
             return player.play(options);
         }
 
@@ -2345,6 +2364,11 @@ export class PlaybackManager {
         }
 
         function playInternal(item, playOptions, onPlaybackStartedFn, prevSource) {
+            self._profileSwitchCleanedPlayers.delete(getPlayer(item, playOptions));
+            return self.trackProfileSwitchPlaybackWork(() => startPlayback(item, playOptions, onPlaybackStartedFn, prevSource));
+        }
+
+        function startPlayback(item, playOptions, onPlaybackStartedFn, prevSource) {
             if (item.IsPlaceHolder) {
                 loading.hide();
                 showPlaybackInfoErrorMessage(self, 'PlaybackErrorPlaceHolder');
@@ -2625,11 +2649,15 @@ export class PlaybackManager {
                     const streamInfo = createStreamInfoFromUrlItem(item);
                     streamInfo.fullscreen = playOptions.fullscreen;
                     getPlayerData(player).isChangingStream = false;
+                    getPlayerData(player).streamInfo = streamInfo;
+                    self.assignPlaybackIdentity(player, streamInfo);
                     return player.play(streamInfo).then(() => {
+                        if (!self.isCurrentPlaybackExecution(player, streamInfo)) return;
                         loading.hide();
                         onPlaybackStartedFn();
                         onPlaybackStarted(player, playOptions, streamInfo);
                     }).catch((errorCode) => {
+                        if (!self.isCurrentPlaybackExecution(player, streamInfo)) return;
                         self.stop(player);
                         loading.hide();
                         showPlaybackInfoErrorMessage(self, errorCode || 'ErrorDefault');
@@ -2720,21 +2748,24 @@ export class PlaybackManager {
                     playerData.isChangingStream = false;
                     playerData.maxStreamingBitrate = maxBitrate;
                     playerData.streamInfo = streamInfo;
+                    self.assignPlaybackIdentity(player, streamInfo);
 
                     return player.play(streamInfo).then(function () {
+                        if (!self.isCurrentPlaybackExecution(player, streamInfo)) return;
                         loading.hide();
                         onPlaybackStartedFn();
                         onPlaybackStarted(player, playOptions, streamInfo, mediaSource);
                     }, function (err) {
+                        if (!self.isCurrentPlaybackExecution(player, streamInfo)) return;
                         // TODO: Improve this because it will report playback start on a failure
                         onPlaybackStartedFn();
                         onPlaybackStarted(player, playOptions, streamInfo, mediaSource);
-                        setTimeout(function () {
+                        return new Promise(resolve => setTimeout(resolve, 100)).then(function () {
                             onPlaybackError.call(player, err, {
                                 type: getMediaError(err),
                                 streamInfo
                             });
-                        }, 100);
+                        });
                     });
                 });
             });
@@ -3169,6 +3200,10 @@ export class PlaybackManager {
         };
 
         function queue(options, mode, player) {
+            return self.trackProfileSwitchPlaybackWork(() => queueItems(options, mode, player));
+        }
+
+        function queueItems(options, mode, player) {
             player = player || self._currentPlayer;
 
             if (!player) {
@@ -3261,6 +3296,15 @@ export class PlaybackManager {
         function onPlaybackStarted(player, playOptions, streamInfo, mediaSource) {
             if (!player) {
                 throw new Error('player cannot be null');
+            }
+            if (!self.isCurrentPlaybackExecution(player, streamInfo)) return;
+
+            self._profileSwitchCleanedPlayers.delete(player);
+
+            const pendingStop = self._profileSwitchStops.get(player);
+            if (pendingStop) {
+                self.rememberLateProfileSwitchStop(player, pendingStop);
+                self._profileSwitchStops.delete(player);
             }
 
             setCurrentPlayerInternal(player);
@@ -3402,6 +3446,7 @@ export class PlaybackManager {
             console.warn('[playbackmanager] onPlaybackError:', e, error);
 
             const streamInfo = error.streamInfo || getPlayerData(player).streamInfo;
+            if (error.streamInfo && !self.isCurrentPlaybackExecution(player, error.streamInfo)) return;
 
             if (streamInfo?.url) {
                 const isAlreadyFallbacking = streamInfo.url.toLowerCase().includes('transcodereasons');
@@ -3434,6 +3479,9 @@ export class PlaybackManager {
         function onPlaybackStopped(e, displayErrorCode) {
             const player = this;
 
+            if (e?.type === 'stopped' && player.supportsPlaybackLifecycle
+                && !self.acceptPlaybackStop(player, displayErrorCode)) return;
+
             if (getPlayerData(player).isChangingStream) {
                 return;
             }
@@ -3444,6 +3492,19 @@ export class PlaybackManager {
             const state = self.getPlayerState(player);
             const data = getPlayerData(player);
             const streamInfo = data.streamInfo;
+            if (Number.isFinite(displayErrorCode?.positionMs) && state.PlayState) {
+                state.PlayState.PositionTicks = displayErrorCode.positionMs * 10000 + (streamInfo?.transcodingOffsetTicks || 0);
+            }
+            if (player.supportsPlaybackLifecycle && displayErrorCode?.mediaState) {
+                const mediaState = displayErrorCode.mediaState;
+                Object.assign(state.PlayState, {
+                    VolumeLevel: mediaState.volumeLevel,
+                    IsMuted: mediaState.isMuted,
+                    IsPaused: mediaState.isPaused,
+                    PlaybackRate: mediaState.playbackRate,
+                    BufferedRanges: mediaState.bufferedRanges
+                });
+            }
 
             const errorOccurred = displayErrorCode && typeof (displayErrorCode) === 'string';
 
@@ -3468,7 +3529,9 @@ export class PlaybackManager {
                 // only used internally as a safeguard to avoid reporting other events to the server after playback stopped
                 streamInfo.ended = true;
 
-                reportPlayback(self, state, player, true, streamInfo.item.ServerId, 'reportPlaybackStopped');
+                if (!self.isProfileSwitchStop(player, state)) {
+                    reportPlayback(self, state, player, true, streamInfo.item.ServerId, 'reportPlaybackStopped');
+                }
             }
 
             state.NextItem = playbackStopInfo.nextItem;
@@ -3477,9 +3540,6 @@ export class PlaybackManager {
                 self._playQueueManager.reset();
             }
 
-            Events.trigger(player, 'playbackstop', [state]);
-            Events.trigger(self, 'playbackstop', [playbackStopInfo]);
-
             const nextItemPlayOptions = nextItem ? (nextItem.item.playOptions || getDefaultPlayOptions()) : getDefaultPlayOptions();
             const newPlayer = nextItem ? getPlayer(nextItem.item, nextItemPlayOptions) : null;
 
@@ -3487,14 +3547,24 @@ export class PlaybackManager {
                 data.streamInfo = null;
                 destroyPlayer(player);
                 removeCurrentPlayer(player);
+                if (e?.type === 'stopped' && !errorOccurred) {
+                    self._profileSwitchCleanedPlayers.add(player);
+                }
             }
+
+            if (e?.type === 'stopped' && !errorOccurred) {
+                self.acknowledgeProfileSwitchStop(player, state, displayErrorCode);
+            }
+
+            Events.trigger(player, 'playbackstop', [state]);
+            Events.trigger(self, 'playbackstop', [playbackStopInfo]);
 
             if (errorOccurred) {
                 showPlaybackInfoErrorMessage(self, 'PlaybackError' + displayErrorCode);
             } else if (newPlayer) {
                 const apiClient = ServerConnections.getApiClient(nextItem.item.ServerId);
 
-                apiClient.getCurrentUser().then(function (user) {
+                self.trackProfileSwitchPlaybackWork(() => apiClient.getCurrentUser().then(function (user) {
                     if (user.Configuration.EnableNextEpisodeAutoPlay || nextMediaType !== MediaType.Video) {
                         self.nextTrack();
 
@@ -3507,7 +3577,7 @@ export class PlaybackManager {
                             }]);
                         }
                     }
-                });
+                }));
             }
         }
 
@@ -3947,10 +4017,165 @@ export class PlaybackManager {
             }
 
             // TODO: remove second param
-            return player.stop(true, true);
+            return this.trackProfileSwitchPlaybackWork(() => player.stop(true, true));
         }
 
         return Promise.resolve();
+    }
+
+    async trackProfileSwitchPlaybackWork(operation) {
+        this._profileSwitchPendingWork++;
+        try {
+            return await operation();
+        } finally {
+            this._profileSwitchPendingWork--;
+        }
+    }
+
+    async trackProfileSwitchReport(player, report) {
+        this._profileSwitchPendingReports++;
+        try {
+            await report;
+            return true;
+        } catch {
+            this._profileSwitchReportFailures.add(player);
+            return false;
+        } finally {
+            this._profileSwitchPendingReports--;
+        }
+    }
+
+    /** @returns {'Idle' | 'Active' | 'Pending' | 'RecoveryRequired' | 'Unknown'} */
+    getProfileSwitchPlaybackStatus(player) {
+        if (this._profileSwitchReportFailures.size > 0) return 'RecoveryRequired';
+        if (this._profileSwitchPendingWork > 0 || this._profileSwitchPendingReports > 0) return 'Pending';
+        if (!player?.isLocalPlayer || !enableLocalPlaylistManagement(player) || !player.supportsPlaybackLifecycle) return 'Unknown';
+        if (this._profileSwitchStops.has(player)
+            || Array.from(this._profileSwitchLateStops.get(player)?.values() || []).some(stop => !stop.observed)) {
+            return 'Pending';
+        }
+        if (this.currentItem(player) != null || this.playSessionId(player) != null || player.isChangingStream) {
+            return 'Active';
+        }
+        return this._profileSwitchCleanedPlayers.has(player) ? 'Idle' : 'Unknown';
+    }
+
+    isProfileSwitchStop(player, state) {
+        const captured = this._profileSwitchStops.get(player);
+        const itemId = state.NowPlayingItem?.Id;
+        const playSessionId = state.PlayState?.PlaySessionId;
+        if (captured && captured.itemId === itemId && captured.playSessionId === playSessionId
+            && samePlaybackIdentity(captured.identity, player.streamInfo?.playbackIdentity)) {
+            return true;
+        }
+
+        const lateStops = this._profileSwitchLateStops.get(player);
+        const lateStop = lateStops?.get(player.streamInfo?.playbackIdentity?.generation);
+        if (lateStop?.itemId === itemId && itemId) {
+            lateStop.observed = true;
+            return true;
+        }
+        return false;
+    }
+
+    assignPlaybackIdentity(player, streamInfo) {
+        if (player.supportsPlaybackLifecycle) streamInfo.playbackIdentity = createPlaybackIdentity(streamInfo);
+    }
+
+    isCurrentPlaybackExecution(player, streamInfo) {
+        return !player.supportsPlaybackLifecycle
+            || samePlaybackIdentity(player.streamInfo?.playbackIdentity, streamInfo.playbackIdentity);
+    }
+
+    acceptPlaybackStop(player, stopInfo) {
+        const pending = this._profileSwitchStops.get(player);
+        const stops = [pending, ...this._profileSwitchLateStops.get(player)?.values() || []];
+        stops.forEach(stop => {
+            if (stop && samePlaybackIdentity(stop.identity, stopInfo?.playbackIdentity)) stop.observed = true;
+        });
+        return samePlaybackIdentity(player.streamInfo?.playbackIdentity, stopInfo?.playbackIdentity);
+    }
+
+    rememberLateProfileSwitchStop(player, stop) {
+        let lateStops = this._profileSwitchLateStops.get(player);
+        if (!lateStops) {
+            lateStops = new Map();
+            this._profileSwitchLateStops.set(player, lateStops);
+        }
+        lateStops.forEach((candidate, key) => {
+            if (candidate.observed) lateStops.delete(key);
+        });
+        if (lateStops.size >= 8 && !lateStops.has(stop.identity.generation)) {
+            throw new Error('Too many unresolved profile switch stop callbacks.');
+        }
+        lateStops.set(stop.identity.generation, {
+            itemId: stop.itemId,
+            playSessionId: stop.playSessionId,
+            identity: stop.identity,
+            observed: stop.observed || lateStops.get(stop.identity.generation)?.observed || false
+        });
+    }
+
+    acknowledgeProfileSwitchStop(player, state, stopInfo) {
+        const captured = this._profileSwitchStops.get(player);
+        if (captured && captured.itemId === state.NowPlayingItem?.Id
+            && captured.playSessionId === state.PlayState?.PlaySessionId
+            && samePlaybackIdentity(captured.identity, stopInfo?.playbackIdentity)) {
+            captured.acknowledge();
+        }
+    }
+
+    async stopForProfileSwitch(player, itemId, playSessionId) {
+        if (!player?.isLocalPlayer || !enableLocalPlaylistManagement(player)
+            || !player.supportsPlaybackLifecycle || !player.streamInfo?.playbackIdentity
+            || this._profileSwitchStops.has(player)
+            || this.currentItem(player)?.Id !== itemId
+            || this.playSessionId(player) !== playSessionId) {
+            throw new Error('Profile switch requires the captured local player.');
+        }
+        const lateStops = this._profileSwitchLateStops.get(player);
+        if (Array.from(lateStops?.values() || []).filter(stop => !stop.observed).length >= 8
+            && !lateStops.has(player.streamInfo.playbackIdentity.generation)) {
+            throw new Error('Too many unresolved profile switch stop callbacks.');
+        }
+
+        let timer;
+        let stoppedObserved = false;
+        let stopRequested = false;
+        const captured = {
+            itemId,
+            playSessionId,
+            identity: player.streamInfo.playbackIdentity,
+            acknowledge: null
+        };
+        const stopped = new Promise(resolve => {
+            captured.acknowledge = () => {
+                stoppedObserved = true;
+                resolve();
+            };
+        });
+        const timeout = new Promise((resolve, reject) => {
+            timer = setTimeout(() => reject(new Error('Player stop timed out.')), 4500);
+        });
+        this._profileSwitchStops.set(player, captured);
+        try {
+            const stopping = Promise.resolve().then(() => {
+                if (!samePlaybackIdentity(player.streamInfo?.playbackIdentity, captured.identity)) {
+                    throw new Error('Playback changed before the captured player stopped.');
+                }
+                stopRequested = true;
+                return this.stop(player);
+            });
+            await Promise.race([Promise.all([stopping, stopped]), timeout]);
+        } finally {
+            clearTimeout(timer);
+            if (this._profileSwitchStops.get(player) === captured) {
+                this._profileSwitchStops.delete(player);
+            }
+            if (stopRequested && !stoppedObserved) {
+                this.rememberLateProfileSwitchStop(player, captured);
+            }
+        }
     }
 
     getBufferedRanges(player = this._currentPlayer) {

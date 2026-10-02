@@ -95,9 +95,18 @@ const defaultClock: SessionSwitchClock = {
     sleep: milliseconds => new Promise(resolve => window.setTimeout(resolve, milliseconds))
 };
 
-const disabledPlaybackPort: PlaybackQuiescePort = {
-    stopAndReport: async () => ({ outcome: 'Failed' })
-};
+function createDeferredPlaybackPort(connections: SessionSwitchConnections): PlaybackQuiescePort {
+    let port: PlaybackQuiescePort | null = null;
+    return {
+        async stopAndReport(session, switchId) {
+            if (port === null) {
+                const { createWebPlaybackQuiescePort } = await import('./playback');
+                port = createWebPlaybackQuiescePort(connections);
+            }
+            return port.stopAndReport(session, switchId);
+        }
+    };
+}
 
 export class WebSessionSwitchApplication {
     private readonly contexts = new Map<string, SessionContext>();
@@ -113,7 +122,7 @@ export class WebSessionSwitchApplication {
         this.clock = options.clock ?? defaultClock;
         this.createCoordinatorId = options.createCoordinatorId ?? createSecureCoordinatorId;
         this.createApi = options.createApi ?? (serverId => new DelegatingProfileSwitchApi(connections, serverId));
-        this.playback = options.playback ?? disabledPlaybackPort;
+        this.playback = options.playback ?? createDeferredPlaybackPort(connections);
     }
 
     async bootstrapAuthenticatedSession(
